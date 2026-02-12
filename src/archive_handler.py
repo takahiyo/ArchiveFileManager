@@ -17,6 +17,7 @@ from config import (
     SUPPORTED_EXTENSIONS,
     TARGET_FORMATS,
     COMPRESSION_LEVELS,
+    EXTENSION_TO_FORMAT,
 )
 from extension_fixer import fix_extension
 from folder_normalizer import normalize_folder_structure
@@ -89,7 +90,8 @@ def extract_archive(archive_path: str, dest_dir: str) -> bool:
             timeout=600,  # 10分でタイムアウト
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
-        if result.returncode != 0:
+        # WinRAR/UnRAR の戻り値: 0=成功, 1=警告(続行可能)
+        if result.returncode not in (0, 1):
             logger.error("解凍失敗 (コード %d): %s\n%s",
                          result.returncode, archive_path, result.stderr)
             return False
@@ -154,7 +156,8 @@ def compress_directory(source_dir: str, output_path: str,
             timeout=600,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
-        if result.returncode != 0:
+        # WinRAR の戻り値: 0=成功, 1=警告(続行可能)
+        if result.returncode not in (0, 1):
             err_msg = f"圧縮失敗 (コード {result.returncode}): {result.stderr.strip()}"
             logger.error("%s\n%s", output_path, err_msg)
             return False, err_msg
@@ -210,6 +213,7 @@ def convert_archive(
     """
     result = ConversionResult(archive_path)
     current_path = archive_path
+    fix_msg = None
 
     # 1. 拡張子の補正
     if fix_extensions:
@@ -223,6 +227,18 @@ def convert_archive(
     current_ext = os.path.splitext(current_path)[1].lower()
     target_ext = fmt_info["extension"]
 
+    # 解凍前の早期スキップ判定:
+    # 変換先と同じ形式なら、解凍・再圧縮せずにスキップする
+    current_format = EXTENSION_TO_FORMAT.get(current_ext)
+    target_format_key = EXTENSION_TO_FORMAT.get(target_ext)
+    if current_format and target_format_key and current_format == target_format_key:
+        if not flatten_folders:
+            # フォルダ整理も不要→完全スキップ
+            result.success = True
+            result.skipped = True
+            result.add_message("ℹ 変換先と同じ形式のためスキップしました")
+            return result
+
     # 一時フォルダを作成
     temp_dir = tempfile.mkdtemp(prefix="afm_")
 
@@ -234,6 +250,7 @@ def convert_archive(
             return result
 
         # 3. フォルダ階層の正規化
+        flattened = 0
         if flatten_folders:
             flattened = normalize_folder_structure(temp_dir)
             if flattened > 0:
@@ -244,6 +261,16 @@ def convert_archive(
         original_dir = os.path.dirname(current_path)
         base_name = os.path.splitext(os.path.basename(current_path))[0]
         output_path = os.path.join(original_dir, base_name + target_ext)
+
+        # 変更の有無をチェック
+        is_same_format = (os.path.normcase(current_ext) == os.path.normcase(target_ext))
+        no_changes = (not fix_msg and flattened == 0)
+
+        if is_same_format and no_changes:
+            result.success = True
+            result.skipped = True
+            result.add_message("ℹ 変更の必要がないためスキップしました")
+            return result
 
         # 同名ファイルが存在する場合（＝同じ形式への変換）
         if os.path.normcase(os.path.abspath(output_path)) == \
