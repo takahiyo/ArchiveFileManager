@@ -34,6 +34,16 @@ AIコーディングにおいて以下を実現する：
 | [REFACTOR_GUIDE.md](./REFACTOR_GUIDE.md) | 分割・リファクタリング全般 | コードを分割・整理するとき | 全言語 |
 | [CSS_GUIDE.md](./CSS_GUIDE.md) | CSS分割の詳細規則 | CSSを分割・改修するとき | **Web専用** |
 
+### エージェント構成
+
+| ドキュメント | 内容 | 対象エージェント |
+|--------------|------|------------------|
+| [CLAUDE.md](./CLAUDE.md) | **エージェント構成の全体定義** | 全体 |
+| [agents/coordinator.md](./agents/coordinator.md) | 統括エージェント指示書 | 統括 |
+| [agents/gui.md](./agents/gui.md) | GUIエージェント指示書 | GUI |
+| [agents/core.md](./agents/core.md) | コアエージェント指示書 | コア |
+| [agents/debugger.md](./agents/debugger.md) | デバッガエージェント指示書 | デバッガ |
+
 ---
 
 ## AIへの指示方法（ユーザー向け）
@@ -115,8 +125,9 @@ CSS_GUIDE.md に従って、参照元調査を完了してから分割を進め�
 ガイドライン間で矛盾が生じた場合、以下の優先順位に従う：
 
 1. **CORE_PRINCIPLES.md**（最優先）
-2. プロジェクト固有のガイドライン
-3. 各詳細ガイド（SSOT_GUIDE等）
+2. **CLAUDE.md / agents/**（エージェント構成・役割定義）
+3. プロジェクト固有のガイドライン
+4. 各詳細ガイド（SSOT_GUIDE等）
 
 ---
 
