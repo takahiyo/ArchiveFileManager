@@ -13,6 +13,7 @@ import logging
 from config import (
     RAR_EXE,
     UNRAR_EXE,
+    WINRAR_EXE,
     SUPPORTED_EXTENSIONS,
     TARGET_FORMATS,
     COMPRESSION_LEVELS,
@@ -103,7 +104,7 @@ def extract_archive(archive_path: str, dest_dir: str) -> bool:
 
 
 def compress_directory(source_dir: str, output_path: str,
-                       target_format: str, compression_level: int) -> bool:
+                       target_format: str, compression_level: int) -> tuple[bool, str]:
     """
     フォルダの中身を圧縮して新しいアーカイブを作成する。
 
@@ -114,17 +115,17 @@ def compress_directory(source_dir: str, output_path: str,
         compression_level: 圧縮率（0〜5）
 
     戻り値:
-        成功した場合 True
+        (成功したか, エラーメッセージ)
     """
     fmt_info = TARGET_FORMATS.get(target_format)
     if fmt_info is None:
-        logger.error("未対応の形式: %s", target_format)
-        return False
+        return False, f"未対応の形式: {target_format}"
 
-    # Rar.exe のコマンドを組み立て
+    # WinRAR.exe を使用 (ZIP/7z 作成に対応するため)
     cmd = [
-        RAR_EXE,
+        WINRAR_EXE,
         "a",                        # アーカイブに追加（新規作成）
+        "-ibck",                    # バックグラウンドで実行
         f"-m{compression_level}",   # 圧縮率
         "-ep1",                     # ルートフォルダのパスを除外
         "-r",                       # 再帰的に処理
@@ -154,17 +155,15 @@ def compress_directory(source_dir: str, output_path: str,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
         if result.returncode != 0:
-            logger.error("圧縮失敗 (コード %d): %s\n%s",
-                         result.returncode, output_path, result.stderr)
-            return False
-        return True
+            err_msg = f"圧縮失敗 (コード {result.returncode}): {result.stderr.strip()}"
+            logger.error("%s\n%s", output_path, err_msg)
+            return False, err_msg
+        return True, ""
 
     except subprocess.TimeoutExpired:
-        logger.error("圧縮がタイムアウトしました: %s", output_path)
-        return False
+        return False, "圧縮がタイムアウトしました"
     except OSError as e:
-        logger.error("圧縮コマンドの実行に失敗: %s (%s)", output_path, e)
-        return False
+        return False, f"圧縮コマンドの実行に失敗: {e}"
 
 
 class ConversionResult:
@@ -252,8 +251,9 @@ def convert_archive(
             # 一時的な名前で出力して後でリネーム
             temp_output = os.path.join(original_dir, base_name + "_temp" + target_ext)
             result.add_message(f"{target_format} 形式で再圧縮中...")
-            if not compress_directory(temp_dir, temp_output, target_format, compression_level):
-                result.add_message("✗ 圧縮に失敗しました")
+            success, err = compress_directory(temp_dir, temp_output, target_format, compression_level)
+            if not success:
+                result.add_message(f"✗ 圧縮に失敗しました: {err}")
                 # 一時出力ファイルを片付け
                 if os.path.exists(temp_output):
                     os.remove(temp_output)
@@ -272,8 +272,9 @@ def convert_archive(
                 counter += 1
 
             result.add_message(f"{target_format} 形式で圧縮中...")
-            if not compress_directory(temp_dir, output_path, target_format, compression_level):
-                result.add_message("✗ 圧縮に失敗しました")
+            success, err = compress_directory(temp_dir, output_path, target_format, compression_level)
+            if not success:
+                result.add_message(f"✗ 圧縮に失敗しました: {err}")
                 return result
 
             # 5. 元ファイルの削除（オプション）

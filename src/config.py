@@ -19,6 +19,7 @@ APP_VERSION = "1.0.0"
 WINRAR_DIR = r"C:\Program Files\WinRAR"
 RAR_EXE = os.path.join(WINRAR_DIR, "Rar.exe")
 UNRAR_EXE = os.path.join(WINRAR_DIR, "UnRAR.exe")
+WINRAR_EXE = os.path.join(WINRAR_DIR, "WinRAR.exe")
 
 # ---------------------------------------------------------------------------
 # 対応する圧縮ファイルの拡張子（小文字で統一）
@@ -99,4 +100,6 @@ def validate_environment() -> list[str]:
         errors.append(f"Rar.exe が見つかりません: {RAR_EXE}")
     if not os.path.isfile(UNRAR_EXE):
         errors.append(f"UnRAR.exe が見つかりません: {UNRAR_EXE}")
+    if not os.path.isfile(WINRAR_EXE):
+        errors.append(f"WinRAR.exe が見つかりません: {WINRAR_EXE}")
     return errors
