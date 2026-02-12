@@ -126,6 +126,9 @@ class ArchiveFileManagerGUI:
         self.delete_orig_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(opt_frame, text="変換後に元ファイルを削除する (注意)", variable=self.delete_orig_var).pack(anchor=tk.W, pady=2)
 
+        self.preserve_timestamp_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(opt_frame, text="変換後ファイルのタイムスタンプを据え置く", variable=self.preserve_timestamp_var).pack(anchor=tk.W, pady=2)
+
         # --- 実行ボタン ---
         btn_frame = ttk.Frame(parent)
         btn_frame.pack(fill=tk.X, pady=(0, 15))
@@ -293,7 +296,8 @@ class ArchiveFileManagerGUI:
             "compression_level": comp_level,
             "fix_extensions": self.fix_ext_var.get(),
             "flatten_folders": self.flatten_var.get(),
-            "delete_original": self.delete_orig_var.get()
+            "delete_original": self.delete_orig_var.get(),
+            "preserve_timestamp": self.preserve_timestamp_var.get(),
         }
 
         threading.Thread(target=self._run_convert_batch, args=(path, opts), daemon=True).start()
@@ -317,6 +321,7 @@ class ArchiveFileManagerGUI:
                 fix_extensions=opts["fix_extensions"],
                 flatten_folders=opts["flatten_folders"],
                 delete_original=opts["delete_original"],
+                preserve_timestamp=opts["preserve_timestamp"],
                 progress_callback=lambda c, t: self.root.after(0, self._update_progress, c, t),
                 log_callback=lambda msg: self.root.after(0, self._log, msg),
                 cancel_check=lambda: self.cancel_requested

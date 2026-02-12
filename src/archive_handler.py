@@ -169,6 +169,26 @@ def compress_directory(source_dir: str, output_path: str,
         return False, f"圧縮コマンドの実行に失敗: {e}"
 
 
+def restore_file_timestamp(file_path: str, stat_result: os.stat_result) -> tuple[bool, str]:
+    """
+    指定ファイルのアクセス時刻/更新時刻を stat 情報で復元する。
+
+    引数:
+        file_path:    タイムスタンプを設定するファイルパス
+        stat_result:  os.stat() の戻り値
+
+    戻り値:
+        (成功したか, エラーメッセージ)
+    """
+    try:
+        os.utime(file_path, (stat_result.st_atime, stat_result.st_mtime))
+        return True, ""
+    except OSError as e:
+        err_msg = f"タイムスタンプ復元に失敗: {e}"
+        logger.warning("%s (%s)", err_msg, file_path)
+        return False, err_msg
+
+
 class ConversionResult:
     """1ファイルの変換結果を保持するクラス"""
 
@@ -190,6 +210,7 @@ def convert_archive(
     fix_extensions: bool = True,
     flatten_folders: bool = True,
     delete_original: bool = False,
+    preserve_timestamp: bool = False,
     progress_callback=None,
 ) -> ConversionResult:
     """
@@ -209,11 +230,19 @@ def convert_archive(
         fix_extensions:     拡張子補正を行うか
         flatten_folders:    フォルダ階層の正規化を行うか
         delete_original:    変換後に元ファイルを削除するか
+        preserve_timestamp: 変換後ファイルに元ファイルの時刻を復元するか
         progress_callback:  進捗報告用のコールバック関数
     """
     result = ConversionResult(archive_path)
     current_path = archive_path
     fix_msg = None
+
+    original_stat = None
+    if preserve_timestamp:
+        try:
+            original_stat = os.stat(current_path)
+        except OSError as e:
+            result.add_message(f"! 元ファイル時刻の取得に失敗したため据え置きをスキップ: {e}")
 
     # 1. 拡張子の補正
     if fix_extensions:
@@ -313,6 +342,14 @@ def convert_archive(
                     result.add_message(f"元ファイルの削除に失敗: {e}")
 
         result.output_path = output_path
+
+        if preserve_timestamp and original_stat is not None and os.path.exists(output_path):
+            restored, err = restore_file_timestamp(output_path, original_stat)
+            if restored:
+                result.add_message("元ファイルのタイムスタンプを据え置きました")
+            else:
+                result.add_message(f"! {err}")
+
         result.success = True
         result.add_message("✓ 変換完了")
 
@@ -333,6 +370,7 @@ def batch_convert(
     fix_extensions: bool = True,
     flatten_folders: bool = True,
     delete_original: bool = False,
+    preserve_timestamp: bool = False,
     progress_callback=None,
     log_callback=None,
     cancel_check=None,
@@ -347,6 +385,7 @@ def batch_convert(
         fix_extensions:     拡張子補正を行うか
         flatten_folders:    フォルダ階層の正規化を行うか
         delete_original:    変換後に元ファイルを削除するか
+        preserve_timestamp: 変換後ファイルに元ファイルの時刻を復元するか
         progress_callback:  進捗報告 (current, total) を受け取る関数
         log_callback:       ログメッセージ (str) を受け取る関数
         cancel_check:       キャンセル判定の関数（True を返したら中断）
@@ -375,6 +414,7 @@ def batch_convert(
             fix_extensions=fix_extensions,
             flatten_folders=flatten_folders,
             delete_original=delete_original,
+            preserve_timestamp=preserve_timestamp,
         )
 
         results.append(conv_result)
