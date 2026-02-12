@@ -261,12 +261,10 @@ def convert_archive(
     current_format = EXTENSION_TO_FORMAT.get(current_ext)
     target_format_key = EXTENSION_TO_FORMAT.get(target_ext)
     if current_format and target_format_key and current_format == target_format_key:
-        if not flatten_folders:
-            # フォルダ整理も不要→完全スキップ
-            result.success = True
-            result.skipped = True
-            result.add_message("ℹ 変換先と同じ形式のためスキップしました")
-            return result
+        result.success = True
+        result.skipped = True
+        result.add_message("ℹ 変換先と同じ形式のためスキップしました")
+        return result
 
     # 一時フォルダを作成
     temp_dir = tempfile.mkdtemp(prefix="afm_")
