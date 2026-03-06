@@ -16,10 +16,30 @@ APP_VERSION = "1.1.0"
 # ---------------------------------------------------------------------------
 # WinRAR 実行ファイルのパス
 # ---------------------------------------------------------------------------
-WINRAR_DIR = r"C:\Program Files\WinRAR"
+def _find_winrar_dir():
+    """WinRARのインストールディレクトリを候補から探す"""
+    candidates = [
+        r"C:\Program Files\WinRAR",
+        r"C:\Program Files (x86)\WinRAR",
+        os.environ.get("ProgramFiles", r"C:\Program Files") + r"\WinRAR",
+    ]
+    for path in candidates:
+        if os.path.isdir(path) and os.path.isfile(os.path.join(path, "WinRAR.exe")):
+            return path
+    return r"C:\Program Files\WinRAR"  # デフォルト
+
+WINRAR_DIR = _find_winrar_dir()
 RAR_EXE = os.path.join(WINRAR_DIR, "Rar.exe")
 UNRAR_EXE = os.path.join(WINRAR_DIR, "UnRAR.exe")
 WINRAR_EXE = os.path.join(WINRAR_DIR, "WinRAR.exe")
+
+def update_winrar_path(new_dir: str):
+    """実行時にWinRARのパスを更新する（GUIからの設定用）"""
+    global WINRAR_DIR, RAR_EXE, UNRAR_EXE, WINRAR_EXE
+    WINRAR_DIR = new_dir
+    RAR_EXE = os.path.join(WINRAR_DIR, "Rar.exe")
+    UNRAR_EXE = os.path.join(WINRAR_DIR, "UnRAR.exe")
+    WINRAR_EXE = os.path.join(WINRAR_DIR, "WinRAR.exe")
 
 # ---------------------------------------------------------------------------
 # 対応する圧縮ファイルの拡張子（小文字で統一）
