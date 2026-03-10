@@ -23,6 +23,8 @@ from config import (
 )
 from archive_handler import scan_archives, batch_convert
 from empty_folder_scanner import scan_empty_folders, delete_folders
+from archive_content_cleaner import scan_archives_for_cleaning, batch_clean_archives
+from config import DEFAULT_CLEAN_PATTERNS
 
 # ログの設定
 logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -72,6 +74,11 @@ class ArchiveFileManagerGUI:
         self.tab_empty = ttk.Frame(self.notebook, padding="10")
         self.notebook.add(self.tab_empty, text=" 🗂 空フォルダ ")
         self._setup_empty_tab(self.tab_empty)
+        
+        # タブ3: 書庫クリーン
+        self.tab_clean = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(self.tab_clean, text=" 🧹 書庫クリーン ")
+        self._setup_clean_tab(self.tab_clean)
 
     # -------------------------------------------------------------------------
     # タブ1: 圧縮変換
@@ -230,6 +237,100 @@ class ArchiveFileManagerGUI:
         
         self.delete_btn = ttk.Button(bottom_frame, text="選択したフォルダを削除", command=self._delete_selected, state=tk.DISABLED)
         self.delete_btn.pack(side=tk.RIGHT, padx=5)
+
+    # -------------------------------------------------------------------------
+    # タブ3: 書庫クリーン
+    # -------------------------------------------------------------------------
+    def _setup_clean_tab(self, parent):
+        # 内部状態
+        self.clean_scan_results = []
+        
+        # --- 対象フォルダ ---
+        dir_frame = ttk.LabelFrame(parent, text=" 対象フォルダ ", padding="10")
+        dir_frame.pack(fill=tk.X, pady=(0, 10))
+
+        self.clean_dir_var = tk.StringVar()
+        ttk.Entry(dir_frame, textvariable=self.clean_dir_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        ttk.Button(dir_frame, text="参照...", command=partial(self._browse_folder, self.clean_dir_var)).pack(side=tk.RIGHT)
+        
+        # オプション群
+        opt_frame = ttk.Frame(dir_frame)
+        opt_frame.pack(fill=tk.X, pady=(5, 0))
+        self.clean_recursive_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(opt_frame, text="下層フォルダも対象にする", variable=self.clean_recursive_var).pack(side=tk.LEFT, padx=(0, 10))
+        self.clean_nesting_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(opt_frame, text="余分な入れ子を解消する", variable=self.clean_nesting_var).pack(side=tk.LEFT, padx=(0, 10))
+        self.clean_shorten_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(opt_frame, text="長すぎる名前を短縮する", variable=self.clean_shorten_var).pack(side=tk.LEFT)
+
+        # --- 除外パターン設定 ---
+        pat_frame = ttk.LabelFrame(parent, text=" 削除パターン設定 ", padding="10")
+        pat_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        pat_input_frame = ttk.Frame(pat_frame)
+        pat_input_frame.pack(fill=tk.X, pady=(0, 5))
+        self.clean_pat_var = tk.StringVar()
+        ttk.Entry(pat_input_frame, textvariable=self.clean_pat_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        ttk.Button(pat_input_frame, text="追加", command=self._add_clean_pattern).pack(side=tk.RIGHT)
+        
+        # パターンリスト表示
+        list_frame = ttk.Frame(pat_frame)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+        self.clean_pat_listbox = tk.Listbox(list_frame, height=4, selectmode=tk.SINGLE)
+        self.clean_pat_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        pat_scroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.clean_pat_listbox.yview)
+        pat_scroll.pack(side=tk.LEFT, fill=tk.Y)
+        self.clean_pat_listbox.configure(yscrollcommand=pat_scroll.set)
+        
+        pat_btn_frame = ttk.Frame(list_frame)
+        pat_btn_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(5, 0))
+        ttk.Button(pat_btn_frame, text="削除", command=self._remove_clean_pattern).pack(fill=tk.X, pady=(0, 5))
+        ttk.Button(pat_btn_frame, text="リセット", command=self._reset_clean_patterns).pack(fill=tk.X)
+        
+        self._reset_clean_patterns() # 初期化
+
+        # --- スキャン＆結果 ---
+        res_frame = ttk.Frame(parent)
+        res_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        scan_btn_frame = ttk.Frame(res_frame)
+        scan_btn_frame.pack(fill=tk.X, pady=(0, 5))
+        self.clean_scan_btn = ttk.Button(scan_btn_frame, text="🔍 スキャン（プレビュー）", command=self._scan_clean_archives)
+        self.clean_scan_btn.pack(side=tk.LEFT)
+        self.clean_res_label = ttk.Label(scan_btn_frame, text="待機中...")
+        self.clean_res_label.pack(side=tk.LEFT, padx=10)
+
+        # 結果Treeview
+        self.clean_tree = ttk.Treeview(res_frame, columns=("archive", "files", "nest_shorten"), show="headings", height=5)
+        self.clean_tree.heading("archive", text="書庫名")
+        self.clean_tree.heading("files", text="削除対象ファイル")
+        self.clean_tree.heading("nest_shorten", text="階層/名前修正")
+        self.clean_tree.column("archive", width=200, anchor="w")
+        self.clean_tree.column("files", width=200, anchor="w")
+        self.clean_tree.column("nest_shorten", width=80, anchor="center")
+        
+        clean_scroll = ttk.Scrollbar(res_frame, orient=tk.VERTICAL, command=self.clean_tree.yview)
+        self.clean_tree.configure(yscrollcommand=clean_scroll.set)
+        self.clean_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        clean_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # --- 実行ボタン ---
+        exec_frame = ttk.Frame(parent)
+        exec_frame.pack(fill=tk.X, pady=(0, 10))
+        self.clean_exec_btn = ttk.Button(exec_frame, text="▶ 処理実行", command=self._execute_clean, state=tk.DISABLED, style="Accent.TButton")
+        self.clean_exec_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        self.clean_cancel_btn = ttk.Button(exec_frame, text="キャンセル", command=self._request_cancel, state=tk.DISABLED)
+        self.clean_cancel_btn.pack(side=tk.RIGHT)
+        
+        # 進捗バー（共有）
+        prog_frame = ttk.Frame(parent)
+        prog_frame.pack(fill=tk.X)
+        self.clean_prog_var = tk.DoubleVar()
+        self.clean_prog = ttk.Progressbar(prog_frame, variable=self.clean_prog_var, maximum=100)
+        self.clean_prog.pack(fill=tk.X, side=tk.TOP)
+        self.clean_status_var = tk.StringVar(value="")
+        ttk.Label(prog_frame, textvariable=self.clean_status_var, style="Status.TLabel").pack(side=tk.LEFT, pady=2)
+
 
     # -------------------------------------------------------------------------
     # 共通・ユーティリティ
@@ -517,6 +618,169 @@ class ArchiveFileManagerGUI:
                 self.empty_folders_data = [x for x in self.empty_folders_data if x["path"] != res["path"]]
                 
         self._apply_filter()
+
+
+    # -------------------------------------------------------------------------
+    # 書庫クリーン ロジック
+    # -------------------------------------------------------------------------
+    def _add_clean_pattern(self):
+        pat = self.clean_pat_var.get().strip()
+        if not pat:
+            return
+        # 重複チェック
+        current = self.clean_pat_listbox.get(0, tk.END)
+        if pat not in current:
+            self.clean_pat_listbox.insert(tk.END, pat)
+            self.clean_pat_var.set("") # クリア
+
+    def _remove_clean_pattern(self):
+        sel = self.clean_pat_listbox.curselection()
+        if sel:
+            self.clean_pat_listbox.delete(sel[0])
+
+    def _reset_clean_patterns(self):
+        self.clean_pat_listbox.delete(0, tk.END)
+        for pat in DEFAULT_CLEAN_PATTERNS:
+            self.clean_pat_listbox.insert(tk.END, pat)
+
+    def _get_current_patterns(self) -> list[str]:
+        return list(self.clean_pat_listbox.get(0, tk.END))
+
+    def _scan_clean_archives(self):
+        root_dir = self.clean_dir_var.get()
+        if not root_dir or not os.path.isdir(root_dir):
+            messagebox.showwarning("入力エラー", "対象フォルダを正しく指定してください。")
+            return
+
+        self.clean_scan_btn.config(state=tk.DISABLED)
+        self.clean_exec_btn.config(state=tk.DISABLED)
+        self.clean_res_label.config(text="スキャン中...")
+        self.clean_tree.delete(*self.clean_tree.get_children())
+        self.clean_scan_results = []
+        self.clean_prog_var.set(0)
+
+        opts = {
+            "root_dir": root_dir,
+            "patterns": self._get_current_patterns(),
+            "recursive": self.clean_recursive_var.get(),
+            "check_nesting": self.clean_nesting_var.get(),
+            "check_shorten": self.clean_shorten_var.get(),
+        }
+
+        threading.Thread(target=self._run_clean_scan, args=(opts,), daemon=True).start()
+
+    def _run_clean_scan(self, opts):
+        try:
+            results = scan_archives_for_cleaning(
+                root_dir=opts["root_dir"],
+                patterns=opts["patterns"],
+                recursive=opts["recursive"],
+                check_nesting=opts["check_nesting"],
+                check_long_names=opts["check_shorten"],
+                progress_callback=lambda c, t: self.root.after(0, self._update_clean_progress, c, t),
+            )
+            self.root.after(0, self._finish_clean_scan, results)
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("エラー", f"スキャン中にエラーが発生しました:\n{e}"))
+            self.root.after(0, self._finish_clean_scan, [])
+
+    def _update_clean_progress(self, current, total):
+        if total > 0:
+            percent = (current / total) * 100
+            self.clean_prog_var.set(percent)
+            self.clean_status_var.set(f"処理中... {current} / {total} ({int(percent)}%)")
+
+    def _finish_clean_scan(self, results):
+        self.clean_scan_results = results
+        total_matched = 0
+
+        for r in results:
+            files_str = ", ".join([os.path.basename(f) for f in r.matched_files])
+            if not files_str:
+                files_str = "(なし)"
+                
+            nest_shorten = []
+            if r.has_nested_folders: nest_shorten.append("階層")
+            if r.long_name_files: nest_shorten.append("名前")
+            ns_str = "+".join(nest_shorten) if nest_shorten else "-"
+
+            self.clean_tree.insert("", tk.END, values=(r.archive_name, files_str, ns_str))
+            total_matched += len(r.matched_files)
+
+        self.clean_res_label.config(text=f"対象: 書庫 {len(results)} 件 / ファイル {total_matched} 個")
+        self.clean_scan_btn.config(state=tk.NORMAL)
+        
+        if results:
+            self.clean_exec_btn.config(state=tk.NORMAL)
+        self.clean_status_var.set("スキャン完了")
+
+    def _execute_clean(self):
+        if not self.clean_scan_results:
+            return
+
+        if not messagebox.askyesno("確認", "リストアップされた書庫の最適化を実行します。\nよろしいですか？"):
+            return
+
+        self.is_running = True
+        self.cancel_requested = False
+        self.clean_scan_btn.config(state=tk.DISABLED)
+        self.clean_exec_btn.config(state=tk.DISABLED)
+        self.clean_cancel_btn.config(state=tk.NORMAL)
+        self.clean_prog_var.set(0)
+
+        opts = {
+            "do_nesting": self.clean_nesting_var.get(),
+            "do_shorten": self.clean_shorten_var.get(),
+        }
+
+        threading.Thread(target=self._run_clean_batch, args=(opts,), daemon=True).start()
+
+    def _run_clean_batch(self, opts):
+        try:
+            results = batch_clean_archives(
+                scan_results=self.clean_scan_results,
+                do_nesting=opts["do_nesting"],
+                do_shorten=opts["do_shorten"],
+                progress_callback=lambda c, t: self.root.after(0, self._update_clean_progress, c, t),
+                cancel_check=lambda: self.cancel_requested
+            )
+            
+            # 結果集計
+            success_count = sum(1 for r in results if r.success)
+            fail_count = len(results) - success_count
+            del_total = sum(r.deleted_count for r in results)
+            flat_total = sum(r.flattened_count for r in results)
+            short_total = sum(r.shortened_count for r in results)
+            
+            msg = f"処理完了: {success_count}件\n"
+            msg += f"- 削除したファイル: {del_total}件\n"
+            msg += f"- 解消した階層: {flat_total}段\n"
+            msg += f"- 短縮した名前: {short_total}件"
+            if fail_count > 0:
+                msg += f"\n\n※失敗: {fail_count}件"
+
+            self.root.after(0, lambda: messagebox.showinfo("完了", msg))
+
+            # 一旦リストをクリア（再スキャンが必要なため）
+            self.root.after(0, self._clear_clean_results)
+
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("エラー", f"予期せぬエラーが発生しました:\n{e}"))
+            
+        self.root.after(0, self._finish_clean_batch)
+
+    def _clear_clean_results(self):
+        self.clean_tree.delete(*self.clean_tree.get_children())
+        self.clean_scan_results = []
+        self.clean_res_label.config(text="待機中...")
+        self.clean_status_var.set("完了")
+
+    def _finish_clean_batch(self):
+        self.is_running = False
+        self.clean_scan_btn.config(state=tk.NORMAL)
+        self.clean_cancel_btn.config(state=tk.DISABLED)
+        # 再スキャンするまで実行ボタンは無効
+        self.clean_exec_btn.config(state=tk.DISABLED)
 
 
 # 部分適用のためのヘルパー
