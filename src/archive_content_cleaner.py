@@ -12,6 +12,8 @@ import logging
 import tempfile
 import shutil
 import hashlib
+import zipfile
+
 
 import config
 from archive_handler import scan_archives, extract_archive, compress_directory, restore_file_timestamp
@@ -65,19 +67,63 @@ class ScanResult:
         self.error: str | None = None
 
 def list_archive_contents(archive_path: str) -> list[str]:
-    """書庫内ファイル一覧取得（UnRAR lb）"""
+    """書庫内ファイル一覧取得（ZIPは標準ライブラリ、他は Rar/UnRAR vb）"""
     if not os.path.isfile(archive_path):
         return []
 
-    cmd = [config.UNRAR_EXE, "lb", archive_path]
+    ext = os.path.splitext(archive_path)[1].lower()
+    
+    # 1. ZIP/CBZ は Python 標準の zipfile で確実に取得
+    if ext in (".zip", ".cbz"):
+        try:
+            with zipfile.ZipFile(archive_path, 'r') as z:
+                # 日本語ファイル名のエンコーディング修正（zipfile の既定の挙動対応）
+                file_list = []
+                for info in z.infolist():
+                    name = info.filename
+                    # zipfile は cp437 か utf-8 しか解釈しないため、cp932 を考慮
+                    try:
+                        if not (info.flag_bits & 0x800): # UTF-8 flag が立っていない場合
+                            # CP437でデコードされたバイト列を戻して CP932 でデコードし直す
+                            name = name.encode('cp437').decode('cp932')
+                    except:
+                        pass
+                    file_list.append(name)
+                return file_list
+        except Exception as e:
+            logger.debug(f"zipfile での取得失敗 {archive_path}: {e}")
+            # 失敗時は Rar.exe へフォールバック
+
+    # 2. RAR/7z 等は Rar.exe vb で取得
+    abs_path = os.path.abspath(archive_path)
+    cmd = [config.RAR_EXE, "vb", "-c-", abs_path]
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=60, creationflags=subprocess.CREATE_NO_WINDOW
+            cmd, capture_output=True, text=False, timeout=60, creationflags=subprocess.CREATE_NO_WINDOW
         )
-        if result.returncode not in (0, 1):
-            return []
-        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        raw_out = result.stdout
+        
+        # 3. エラーまたは空、かつ UnRAR があれば試す (念のため)
+        if (result.returncode not in (0, 1) or not raw_out.strip()) and config.UNRAR_EXE != config.RAR_EXE:
+            cmd_unrar = [config.UNRAR_EXE, "vb", "-c-", abs_path]
+            res_un_raw = subprocess.run(cmd_unrar, capture_output=True, text=False, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
+            if res_un_raw.stdout.strip():
+                raw_out = res_un_raw.stdout
+
+        # デコード
+        decoded_text = ""
+        for enc in ["cp932", "utf-8"]:
+            try:
+                decoded_text = raw_out.decode(enc)
+                if decoded_text.strip():
+                    break
+            except:
+                pass
+        
+        if not decoded_text and raw_out:
+            decoded_text = raw_out.decode("utf-8", errors="replace")
+
+        return [line.strip() for line in decoded_text.splitlines() if line.strip()]
     except Exception as e:
         logger.error("一覧取得失敗: %s", e)
         return []
