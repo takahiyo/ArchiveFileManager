@@ -99,15 +99,55 @@ FORMAT_TO_EXTENSION = {
 
 # ---------------------------------------------------------------------------
 # 書庫内ファイル削除（書庫クリーン）のデフォルト除外パターン
-# fnmatch 形式のグロブパターンで指定する
 # ---------------------------------------------------------------------------
-DEFAULT_CLEAN_PATTERNS = [
+_INITIAL_PATTERNS = [
     "*.url",
     "*.lnk",
     "Thumbs.db",
     "desktop.ini",
     ".DS_Store",
 ]
+
+CLEAN_PATTERNS_FILE = "clean_patterns.txt"
+
+def get_exe_dir() -> str:
+    """実行ファイル（またはスクリプト）の存在するディレクトリを返す"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    else:
+        # スクリプト実行時は src の親ディレクトリ（プロジェクトルート）とする
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def load_clean_patterns() -> list[str]:
+    """外部ファイルからパターンを読み込む。存在しなければ初期値で作成する。"""
+    file_path = os.path.join(get_exe_dir(), CLEAN_PATTERNS_FILE)
+    if os.path.isfile(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                patterns = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+                if patterns:
+                    return patterns
+        except Exception as e:
+            print(f"Failed to load {CLEAN_PATTERNS_FILE}: {e}")
+
+    # ファイルがない、または空の場合は初期値を使用し、ファイルを作成する
+    save_clean_patterns(_INITIAL_PATTERNS)
+    return _INITIAL_PATTERNS
+
+def save_clean_patterns(patterns: list[str]):
+    """パターンを外部ファイルに保存する。"""
+    file_path = os.path.join(get_exe_dir(), CLEAN_PATTERNS_FILE)
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write("# ArchiveFileManager - 書庫クリーン削除パターン設定\n")
+            f.write("# 1行に1つのパターン（グロブ形式）を記述してください。\n")
+            for pat in patterns:
+                f.write(f"{pat}\n")
+    except Exception as e:
+        print(f"Failed to save {CLEAN_PATTERNS_FILE}: {e}")
+
+# 初回読み込み
+DEFAULT_CLEAN_PATTERNS = load_clean_patterns()
 
 # 書庫内ファイル名・フォルダ名の最大文字数（拡張子を除く）
 # この値を超える名前は短縮の対象となる

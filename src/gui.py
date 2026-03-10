@@ -625,15 +625,21 @@ class ArchiveFileManagerGUI:
         if pat not in current:
             self.clean_pat_listbox.insert(tk.END, pat)
             self.clean_pat_var.set("") # クリア
+            # 外部ファイルに保存
+            config.save_clean_patterns(self._get_current_patterns())
 
     def _remove_clean_pattern(self):
         sel = self.clean_pat_listbox.curselection()
         if sel:
             self.clean_pat_listbox.delete(sel[0])
+            # 外部ファイルに保存
+            config.save_clean_patterns(self._get_current_patterns())
 
     def _reset_clean_patterns(self):
+        """外部ファイルから再読み込みする（ファイルがなければ初期値）"""
+        patterns = config.load_clean_patterns()
         self.clean_pat_listbox.delete(0, tk.END)
-        for pat in config.DEFAULT_CLEAN_PATTERNS:
+        for pat in patterns:
             self.clean_pat_listbox.insert(tk.END, pat)
 
     def _get_current_patterns(self) -> list[str]:

@@ -1,0 +1,7 @@
+# ArchiveFileManager - 書庫クリーン削除パターン設定
+# 1行に1つのパターン（グロブ形式）を記述してください。
+*.url
+*.lnk
+Thumbs.db
+desktop.ini
+.DS_Store
