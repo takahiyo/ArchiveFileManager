@@ -278,35 +278,59 @@ def process_single_archive(
     """1つの書庫を処理する（解凍→修正→再圧縮、または直接削除）"""
     res = CleanResult(scan_result.archive_path)
     archive_path = scan_result.archive_path
+    # zipfile デコードフラグ
+    is_zip = archive_path.lower().endswith((".zip", ".cbz"))
     
     # 入れ子解消か名前短縮が必要なら、「解凍→再圧縮」フロー
+    # また、ZIP 形式の場合、Rar.exe d (削除) はサポートされていないため再圧縮フローで対応する
     need_repack = (do_nesting and scan_result.has_nested_folders) or \
-                  (do_shorten and scan_result.long_name_files)
+                  (do_shorten and scan_result.long_name_files) or \
+                  (is_zip and scan_result.matched_files)
                   
-    # さらに、パターンマッチがあり、かつUnrarで解凍する場合は再圧縮フローの中で削除する方が安全・確実
-    # WinRAR dコマンドは高速だが、複雑な処理と混ざるなら一貫性を優先
-    
     if not need_repack and scan_result.matched_files:
-        # 削除のみで済む場合（高速フロー: WinRAR dコマンド）
-        cmd = [config.WINRAR_EXE, "d", "-ibck", "-y", archive_path]
-        cmd.extend(scan_result.matched_files)
+        # 削除のみで済む RAR/7z の場合（高速フロー: Rar.exe dコマンド）
+        # ファイル数が多い場合はリストファイル方式を使用
+        temp_list = None
         try:
+            cmd = [config.RAR_EXE, "d", "-idq", "-y", archive_path]
+            
+            if len(scan_result.matched_files) > 20:
+                # 一時リストファイルを作成
+                fd, temp_list = tempfile.mkstemp(prefix="afm_del_", suffix=".lst", text=True)
+                with os.fdopen(fd, 'w', encoding='cp932', errors='replace') as f:
+                    for m in scan_result.matched_files:
+                        f.write(m + "\n")
+                cmd.append(f"@{temp_list}")
+                logger.info(f"大量削除のためリストファイルを使用します: {len(scan_result.matched_files)}件")
+            else:
+                cmd.extend(scan_result.matched_files)
+
+            logger.info(f"直接削除実行: {os.path.basename(archive_path)}")
             r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=300, creationflags=subprocess.CREATE_NO_WINDOW)
+            
             if r.returncode in (0, 1):
                 res.success = True
                 res.deleted_count = len(scan_result.matched_files)
                 res.message = f"✓ {res.deleted_count}件のファイルを削除"
+                logger.info(f"直接削除成功: {res.message}")
                 return res
             else:
-                res.message = f"✗ 削除失敗: {r.stderr.strip()}"
+                res.message = f"✗ 削除失敗 (code:{r.returncode})"
+                logger.error(f"削除コマンド失敗: {archive_path}\n{r.stderr}")
                 return res
         except Exception as e:
             res.message = f"✗ コマンド例外: {e}"
+            logger.error(f"直接削除中に例外が発生: {e}")
             return res
+        finally:
+            if temp_list and os.path.exists(temp_list):
+                try: os.remove(temp_list)
+                except: pass
 
     elif need_repack:
         # 解凍・修正・再圧縮フロー
         temp_dir = tempfile.mkdtemp(prefix="afm_clean_")
+        logger.info(f"再圧縮フロー開始: {scan_result.archive_name} -> temp:{temp_dir}")
         try:
             # タイムスタンプ保持
             try:
@@ -317,43 +341,54 @@ def process_single_archive(
             # 1. 解凍
             if not extract_archive(archive_path, temp_dir):
                 res.message = "✗ 解凍に失敗しました"
+                logger.error(f"解凍失敗: {archive_path}")
                 return res
+            logger.info("  解凍成功")
                 
             # 2. パターンマッチファイルの物理削除
             if scan_result.matched_files:
+                matched_basenames = [os.path.basename(m).lower() for m in scan_result.matched_files]
                 for root, dirs, files in os.walk(temp_dir):
                     for f in files:
-                        for p in [os.path.basename(m) for m in scan_result.matched_files]:
-                            if fnmatch.fnmatch(f.lower(), p.lower()):
-                                try:
-                                    os.remove(os.path.join(root, f))
-                                    res.deleted_count += 1
-                                except:
-                                    pass
+                        if f.lower() in matched_basenames:
+                            try:
+                                os.remove(os.path.join(root, f))
+                                res.deleted_count += 1
+                            except Exception as e:
+                                logger.warning(f"  ファイル削除失敗: {f} ({e})")
+                logger.info(f"  物理削除完了: {res.deleted_count}件")
 
             # 3. 入れ子解消
             if do_nesting and scan_result.has_nested_folders:
                 res.flattened_count = normalize_folder_structure(temp_dir)
+                logger.info(f"  入れ子解消完了: {res.flattened_count}段")
                 
             # 4. 名前短縮
             if do_shorten:
                 res.shortened_count = shorten_long_names_in_dir(temp_dir, config.MAX_NAME_LENGTH)
+                logger.info(f"  名前短縮完了: {res.shortened_count}件")
                 
             # 5. 再圧縮
-            # 現在の拡張子からフォーマットを判定し、同じ形式で圧縮
             ext = os.path.splitext(archive_path)[1].lower()
             target_format = "ZIP"
             if ext in (".rar", ".cbr"): target_format = "RAR"
             elif ext in (".7z", ".cb7"): target_format = "7z"
             
-            # 再圧縮実行 (標準圧縮)
             temp_out = archive_path + ".tmp"
+            logger.info(f"  再圧縮実行 ({target_format})...")
             succ, err = compress_directory(temp_dir, temp_out, target_format, 3)
             
             if succ:
                 # 成功したら元ファイルと置き換え
-                os.remove(archive_path)
-                os.rename(temp_out, archive_path)
+                try:
+                    if os.path.exists(archive_path):
+                        os.remove(archive_path)
+                    os.rename(temp_out, archive_path)
+                    logger.info("  ファイル置換成功")
+                except Exception as e:
+                    res.message = f"✗ 置換失敗: {e}"
+                    logger.error(f"ファイル置換失敗: {e}")
+                    return res
                 
                 # タイムスタンプ復元
                 if original_stat:
@@ -365,9 +400,11 @@ def process_single_archive(
                 if res.flattened_count: msgs.append(f"階層解消:{res.flattened_count}段")
                 if res.shortened_count: msgs.append(f"名前短縮:{res.shortened_count}件")
                 res.message = "✓ " + ", ".join(msgs)
+                logger.info(f"最終結果: {res.message}")
             else:
                 if os.path.exists(temp_out): os.remove(temp_out)
                 res.message = f"✗ 再圧縮失敗: {err}"
+                logger.error(f"再圧縮失敗: {err}")
                 
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)

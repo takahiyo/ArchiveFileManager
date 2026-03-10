@@ -49,30 +49,58 @@ def scan_archives(root_dir: str, recursive: bool = True) -> list[str]:
 def extract_archive(archive_path: str, dest_dir: str) -> bool:
     """
     圧縮ファイルを指定フォルダに解凍する。
-
-    引数:
-        archive_path: 解凍する圧縮ファイルのパス
-        dest_dir:     解凍先フォルダ
-
-    戻り値:
-        成功した場合 True
+    ZIPの場合はPython標準ライブラリを優先して使用し、安定性を確保する。
     """
     if not os.path.isfile(archive_path):
         logger.error("ファイルが存在しません: %s", archive_path)
         return False
 
-    rar_exe, unrar_exe, winrar_exe = _get_rar_paths()
-    # UnRAR.exe は ZIP, RAR, 7z すべて解凍できる
-    cmd = [
-        unrar_exe,
-        "x",            # フォルダ構造を保持して解凍
-        "-o+",          # 既存ファイルは上書き
-        "-y",           # すべての確認に「はい」で応答
-        archive_path,
-        dest_dir + os.sep,  # 末尾にセパレータが必要
-    ]
+    ext = os.path.splitext(archive_path)[1].lower()
+    is_zip = ext in (".zip", ".cbz")
 
-    logger.debug("解凍コマンド: %s", " ".join(cmd))
+    if is_zip:
+        # ZIPの場合は Python の zipfile を使用（WinRARのパス不具合回避）
+        try:
+            import zipfile
+            with zipfile.ZipFile(archive_path, 'r') as z:
+                for member in z.infolist():
+                    # 日本語ファイル名対応
+                    filename = member.filename
+                    if member.flag_bits & 0x800:
+                        filename = filename.encode('cp437').decode('utf-8')
+                    else:
+                        try:
+                            filename = filename.encode('cp437').decode('cp932')
+                        except:
+                            pass
+                    
+                    target_path = os.path.join(dest_dir, filename)
+                    # フォルダ作成
+                    if filename.endswith('/') or filename.endswith('\\'):
+                        os.makedirs(target_path, exist_ok=True)
+                        continue
+                    
+                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                    with z.open(member) as source, open(target_path, "wb") as target:
+                        shutil.copyfileobj(source, target)
+            logger.info("  Python zipfile による解凍成功")
+            return True
+        except Exception as e:
+            logger.warning(f"  Python zipfile 解凍失敗: {e}、外部ツールを試行します")
+
+    # 外部ツールによる解凍
+    rar_exe, unrar_exe, winrar_exe = _get_rar_paths()
+    abs_archive = os.path.abspath(archive_path)
+    abs_dest = os.path.abspath(dest_dir)
+    
+    cmd = [
+        rar_exe,
+        "x",
+        "-o+",
+        "-y",
+        abs_archive,
+        abs_dest + os.sep,
+    ]
 
     try:
         result = subprocess.run(
@@ -81,21 +109,23 @@ def extract_archive(archive_path: str, dest_dir: str) -> bool:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=600,  # 10分でタイムアウト
+            timeout=600,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
-        # WinRAR/UnRAR の戻り値: 0=成功, 1=警告(続行可能)
         if result.returncode not in (0, 1):
-            logger.error("解凍失敗 (コード %d): %s\n%s",
-                         result.returncode, archive_path, result.stderr)
+            if rar_exe != unrar_exe:
+                cmd[0] = unrar_exe
+                result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600, creationflags=subprocess.CREATE_NO_WINDOW)
+                if result.returncode in (0, 1):
+                    return True
+
+            err_msg = f"解凍失敗 (コード {result.returncode}): {result.stderr.strip()}"
+            logger.error("%s\n%s", archive_path, err_msg)
             return False
         return True
 
-    except subprocess.TimeoutExpired:
-        logger.error("解凍がタイムアウトしました: %s", archive_path)
-        return False
-    except OSError as e:
-        logger.error("解凍コマンドの実行に失敗: %s (%s)", archive_path, e)
+    except Exception as e:
+        logger.error("解凍中に例外が発生: %s (%s)", archive_path, e)
         return False
 
 
