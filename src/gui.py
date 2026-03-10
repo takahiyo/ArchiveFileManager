@@ -13,18 +13,11 @@ from tkinter import ttk, filedialog, messagebox
 import logging
 import datetime
 
-from config import (
-    APP_NAME, 
-    APP_VERSION, 
-    TARGET_FORMATS, 
-    COMPRESSION_LEVEL_NAMES, 
-    COMPRESSION_LEVELS,
-    validate_environment
-)
+import config
 from archive_handler import scan_archives, batch_convert
 from empty_folder_scanner import scan_empty_folders, delete_folders
 from archive_content_cleaner import scan_archives_for_cleaning, batch_clean_archives
-from config import DEFAULT_CLEAN_PATTERNS
+# from config import DEFAULT_CLEAN_PATTERNS (removed as using import config)
 
 # ログの設定
 logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -33,7 +26,7 @@ logger = logging.getLogger(__name__)
 class ArchiveFileManagerGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"{APP_NAME} v{APP_VERSION}")
+        self.root.title(f"{config.APP_NAME} v{config.APP_VERSION}")
         self.root.geometry("640x720")
         self.root.minsize(600, 650)
         
@@ -105,7 +98,7 @@ class ArchiveFileManagerGUI:
         ttk.Label(fmt_frame, text="変換先の形式:").pack(side=tk.LEFT, padx=(0, 10))
         
         self.target_fmt_var = tk.StringVar(value="ZIP")
-        for fmt in TARGET_FORMATS.keys():
+        for fmt in config.TARGET_FORMATS.keys():
             ttk.Radiobutton(fmt_frame, text=fmt, value=fmt, variable=self.target_fmt_var).pack(side=tk.LEFT, padx=5)
 
         # 圧縮率
@@ -114,7 +107,7 @@ class ArchiveFileManagerGUI:
         ttk.Label(level_frame, text="圧縮率:").pack(side=tk.LEFT, padx=(0, 10))
         
         self.comp_level_var = tk.StringVar(value="標準")
-        level_combo = ttk.Combobox(level_frame, textvariable=self.comp_level_var, values=COMPRESSION_LEVEL_NAMES, state="readonly", width=10)
+        level_combo = ttk.Combobox(level_frame, textvariable=self.comp_level_var, values=config.COMPRESSION_LEVEL_NAMES, state="readonly", width=10)
         level_combo.pack(side=tk.LEFT)
 
         # オプション
@@ -337,7 +330,7 @@ class ArchiveFileManagerGUI:
     # -------------------------------------------------------------------------
     def _check_env(self):
         """環境チェック"""
-        errors = validate_environment()
+        errors = config.validate_environment()
         if errors:
             msg = "環境に問題が見つかりました:\n\n" + "\n".join(errors)
             messagebox.showerror("環境エラー", msg)
@@ -640,7 +633,7 @@ class ArchiveFileManagerGUI:
 
     def _reset_clean_patterns(self):
         self.clean_pat_listbox.delete(0, tk.END)
-        for pat in DEFAULT_CLEAN_PATTERNS:
+        for pat in config.DEFAULT_CLEAN_PATTERNS:
             self.clean_pat_listbox.insert(tk.END, pat)
 
     def _get_current_patterns(self) -> list[str]:

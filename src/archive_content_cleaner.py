@@ -13,13 +13,7 @@ import tempfile
 import shutil
 import hashlib
 
-from config import (
-    UNRAR_EXE,
-    WINRAR_EXE,
-    SUPPORTED_EXTENSIONS,
-    DEFAULT_CLEAN_PATTERNS,
-    MAX_NAME_LENGTH,
-)
+import config
 from archive_handler import scan_archives, extract_archive, compress_directory, restore_file_timestamp
 from folder_normalizer import normalize_folder_structure
 
@@ -41,8 +35,10 @@ def find_matching_files(file_list: list[str], patterns: list[str]) -> list[str]:
                 break
     return matched
 
-def find_long_names(file_list: list[str], max_length: int = MAX_NAME_LENGTH) -> list[str]:
+def find_long_names(file_list: list[str], max_length: int = None) -> list[str]:
     """ファイル一覧から長すぎるファイル名/フォルダ名を抽出（相対パス文字列で評価）"""
+    if max_length is None:
+        max_length = config.MAX_NAME_LENGTH
     long_items = []
     for file_path in file_list:
         parts = file_path.replace("\\", "/").split("/")
@@ -73,7 +69,7 @@ def list_archive_contents(archive_path: str) -> list[str]:
     if not os.path.isfile(archive_path):
         return []
 
-    cmd = [UNRAR_EXE, "lb", archive_path]
+    cmd = [config.UNRAR_EXE, "lb", archive_path]
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, encoding="utf-8",
@@ -133,7 +129,7 @@ def scan_archives_for_cleaning(
                 
             # 3. 長い名前判定
             if check_long_names:
-                scan_result.long_name_files = find_long_names(contents, MAX_NAME_LENGTH)
+                scan_result.long_name_files = find_long_names(contents, config.MAX_NAME_LENGTH)
 
             # 何らかの処理が必要か
             if scan_result.matched_files or scan_result.has_nested_folders or scan_result.long_name_files:
@@ -161,8 +157,10 @@ class CleanResult:
         self.shortened_count: int = 0
 
 
-def shorten_name(name: str, max_length: int = MAX_NAME_LENGTH) -> str:
+def shorten_name(name: str, max_length: int = None) -> str:
     """名前を短縮（先頭 + ハッシュ + 拡張子）"""
+    if max_length is None:
+        max_length = config.MAX_NAME_LENGTH
     base, ext = os.path.splitext(name)
     if len(base) <= max_length:
         return name
@@ -178,8 +176,10 @@ def shorten_name(name: str, max_length: int = MAX_NAME_LENGTH) -> str:
     shortened = f"{base[:keep_len]}~{hash_str}{ext}"
     return shortened
 
-def shorten_long_names_in_dir(target_dir: str, max_length: int = MAX_NAME_LENGTH) -> int:
+def shorten_long_names_in_dir(target_dir: str, max_length: int = None) -> int:
     """ディレクトリ内の長すぎるファイル/フォルダ名を再帰的に短縮"""
+    if max_length is None:
+        max_length = config.MAX_NAME_LENGTH
     shortened_count = 0
     # ボトムアップで処理（深い階層からリネーム）
     for dirpath, dirnames, filenames in os.walk(target_dir, topdown=False):
@@ -242,7 +242,7 @@ def process_single_archive(
     
     if not need_repack and scan_result.matched_files:
         # 削除のみで済む場合（高速フロー: WinRAR dコマンド）
-        cmd = [WINRAR_EXE, "d", "-ibck", "-y", archive_path]
+        cmd = [config.WINRAR_EXE, "d", "-ibck", "-y", archive_path]
         cmd.extend(scan_result.matched_files)
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=300, creationflags=subprocess.CREATE_NO_WINDOW)
@@ -291,7 +291,7 @@ def process_single_archive(
                 
             # 4. 名前短縮
             if do_shorten:
-                res.shortened_count = shorten_long_names_in_dir(temp_dir, MAX_NAME_LENGTH)
+                res.shortened_count = shorten_long_names_in_dir(temp_dir, config.MAX_NAME_LENGTH)
                 
             # 5. 再圧縮
             # 現在の拡張子からフォーマットを判定し、同じ形式で圧縮

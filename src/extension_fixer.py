@@ -8,7 +8,7 @@ ArchiveFileManager - 拡張子自動補正
 import os
 import logging
 
-from config import MAGIC_BYTES, FORMAT_TO_EXTENSION, EXTENSION_TO_FORMAT, SUPPORTED_EXTENSIONS
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ def detect_real_format(file_path: str) -> str | None:
         return None
 
     # マジックバイトの長い順にチェック（誤判定を防ぐ）
-    for fmt, magic in sorted(MAGIC_BYTES.items(), key=lambda x: len(x[1]), reverse=True):
+    for fmt, magic in sorted(config.MAGIC_BYTES.items(), key=lambda x: len(x[1]), reverse=True):
         if header.startswith(magic):
             return fmt
 
@@ -57,7 +57,7 @@ def fix_extension(file_path: str, dry_run: bool = False) -> tuple[str, str | Non
     current_ext = os.path.splitext(file_path)[1].lower()
 
     # 対応していない拡張子はスキップ
-    if current_ext not in SUPPORTED_EXTENSIONS:
+    if current_ext not in config.SUPPORTED_EXTENSIONS:
         return file_path, None
 
     real_format = detect_real_format(file_path)
@@ -66,7 +66,7 @@ def fix_extension(file_path: str, dry_run: bool = False) -> tuple[str, str | Non
         return file_path, None
 
     # 現在の拡張子が示す形式を取得
-    current_format = EXTENSION_TO_FORMAT.get(current_ext)
+    current_format = config.EXTENSION_TO_FORMAT.get(current_ext)
 
     # 形式が一致する場合は修正不要
     if current_format == real_format:
@@ -80,7 +80,7 @@ def fix_extension(file_path: str, dry_run: bool = False) -> tuple[str, str | Non
         comic_ext_map = {"zip": ".cbz", "rar": ".cbr", "7z": ".cb7"}
         correct_ext = comic_ext_map.get(real_format)
     else:
-        correct_ext = FORMAT_TO_EXTENSION.get(real_format)
+        correct_ext = config.FORMAT_TO_EXTENSION.get(real_format)
 
     if correct_ext is None:
         return file_path, None
@@ -131,7 +131,7 @@ def scan_and_fix_extensions(root_dir: str, recursive: bool = True,
     for dirpath, _dirnames, filenames in walker:
         for fname in filenames:
             ext = os.path.splitext(fname)[1].lower()
-            if ext not in SUPPORTED_EXTENSIONS:
+            if ext not in config.SUPPORTED_EXTENSIONS:
                 continue
 
             file_path = os.path.join(dirpath, fname)

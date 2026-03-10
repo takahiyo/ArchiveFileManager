@@ -10,19 +10,12 @@ import tempfile
 import shutil
 import logging
 
-from config import (
-    RAR_EXE,
-    UNRAR_EXE,
-    WINRAR_EXE,
-    SUPPORTED_EXTENSIONS,
-    TARGET_FORMATS,
-    COMPRESSION_LEVELS,
-    EXTENSION_TO_FORMAT,
-)
-from extension_fixer import fix_extension
-from folder_normalizer import normalize_folder_structure
-
+import config
 logger = logging.getLogger(__name__)
+
+def _get_rar_paths():
+    """現在のconfigから最新のパスを取得する（動的更新対応）"""
+    return config.RAR_EXE, config.UNRAR_EXE, config.WINRAR_EXE
 
 
 def scan_archives(root_dir: str, recursive: bool = True) -> list[str]:
@@ -41,13 +34,13 @@ def scan_archives(root_dir: str, recursive: bool = True) -> list[str]:
     if recursive:
         for dirpath, _dirnames, filenames in os.walk(root_dir):
             for fname in filenames:
-                if os.path.splitext(fname)[1].lower() in SUPPORTED_EXTENSIONS:
+                if os.path.splitext(fname)[1].lower() in config.SUPPORTED_EXTENSIONS:
                     archives.append(os.path.join(dirpath, fname))
     else:
         for fname in os.listdir(root_dir):
             full_path = os.path.join(root_dir, fname)
             if os.path.isfile(full_path):
-                if os.path.splitext(fname)[1].lower() in SUPPORTED_EXTENSIONS:
+                if os.path.splitext(fname)[1].lower() in config.SUPPORTED_EXTENSIONS:
                     archives.append(full_path)
 
     return sorted(archives)
@@ -68,9 +61,10 @@ def extract_archive(archive_path: str, dest_dir: str) -> bool:
         logger.error("ファイルが存在しません: %s", archive_path)
         return False
 
+    rar_exe, unrar_exe, winrar_exe = _get_rar_paths()
     # UnRAR.exe は ZIP, RAR, 7z すべて解凍できる
     cmd = [
-        UNRAR_EXE,
+        unrar_exe,
         "x",            # フォルダ構造を保持して解凍
         "-o+",          # 既存ファイルは上書き
         "-y",           # すべての確認に「はい」で応答
@@ -119,13 +113,14 @@ def compress_directory(source_dir: str, output_path: str,
     戻り値:
         (成功したか, エラーメッセージ)
     """
-    fmt_info = TARGET_FORMATS.get(target_format)
+    fmt_info = config.TARGET_FORMATS.get(target_format)
     if fmt_info is None:
         return False, f"未対応の形式: {target_format}"
 
+    rar_exe, unrar_exe, winrar_exe = _get_rar_paths()
     # WinRAR.exe を使用 (ZIP/7z 作成に対応するため)
     cmd = [
-        WINRAR_EXE,
+        winrar_exe,
         "a",                        # アーカイブに追加（新規作成）
         "-ibck",                    # バックグラウンドで実行
         f"-m{compression_level}",   # 圧縮率
@@ -246,20 +241,21 @@ def convert_archive(
 
     # 1. 拡張子の補正
     if fix_extensions:
+        from extension_fixer import fix_extension
         new_path, fix_msg = fix_extension(current_path)
         if fix_msg:
             result.add_message(fix_msg)
             current_path = new_path
 
     # 変換先の拡張子と現在の拡張子が同じで、階層修正も不要なら最適化
-    fmt_info = TARGET_FORMATS.get(target_format)
+    fmt_info = config.TARGET_FORMATS.get(target_format)
     current_ext = os.path.splitext(current_path)[1].lower()
     target_ext = fmt_info["extension"]
 
     # 解凍前の早期スキップ判定:
     # 変換先と同じ形式なら、解凍・再圧縮せずにスキップする
-    current_format = EXTENSION_TO_FORMAT.get(current_ext)
-    target_format_key = EXTENSION_TO_FORMAT.get(target_ext)
+    current_format = config.EXTENSION_TO_FORMAT.get(current_ext)
+    target_format_key = config.EXTENSION_TO_FORMAT.get(target_ext)
     if current_format and target_format_key and current_format == target_format_key:
         result.success = True
         result.skipped = True
@@ -279,6 +275,7 @@ def convert_archive(
         # 3. フォルダ階層の正規化
         flattened = 0
         if flatten_folders:
+            from folder_normalizer import normalize_folder_structure
             flattened = normalize_folder_structure(temp_dir)
             if flattened > 0:
                 result.add_message(f"フォルダ階層を {flattened} 段解消しました")
@@ -426,4 +423,29 @@ def batch_convert(
         if progress_callback:
             progress_callback(i + 1, total)
 
-    return results
+def get_archive_list(archive_path: str) -> list[str]:
+    """アーカイブ内のファイルリストを取得する"""
+    rar_exe, _, _ = _get_rar_paths()
+    cmd = [rar_exe, "vt", "-y", archive_path]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW)
+        files = []
+        for line in result.stdout.splitlines():
+            if line.startswith("Name: "):
+                files.append(line[6:].strip())
+        return files
+    except Exception as e:
+        logger.error(f"アーカイブリスト取得失敗: {e}")
+        return []
+
+def remove_from_archive(archive_path: str, file_list: list[str]) -> bool:
+    """アーカイブ内から指定したファイルを削除する"""
+    rar_exe, _, _ = _get_rar_paths()
+    # WinRAR 'd' コマンド
+    cmd = [rar_exe, "d", "-ibck", "-y", archive_path] + file_list
+    try:
+        result = subprocess.run(cmd, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        return result.returncode in (0, 1)
+    except Exception as e:
+        logger.error(f"アーカイブ内削除失敗: {e}")
+        return False
