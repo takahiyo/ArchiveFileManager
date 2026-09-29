@@ -15,7 +15,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 from archive_content_cleaner import (
     find_matching_files,
     find_long_names,
-    shorten_name
+    shorten_name,
+    check_nested_folders
 )
 
 def test_matching_logic():
@@ -71,11 +72,41 @@ def test_long_name_logic():
 
     return True
 
+def test_nested_folder_logic():
+    print("Testing nested folder detection logic...")
+    
+    # 正常系：単純な入れ子
+    case_normal = ["Folder/image1.png", "Folder/image2.png"]
+    # 異常系：ルートにファイルがある
+    case_root_file = ["Folder/image1.png", "image2.png"]
+    # Rar.exe等でディレクトリそのものが末尾スラッシュなしで含まれる場合
+    case_rar_dir = ["Folder", "Folder/image.png"]
+    # ディレクトリそのものが末尾スラッシュありで含まれる場合
+    case_zip_dir = ["Folder/", "Folder/image.png"]
+    
+    if not check_nested_folders(case_normal):
+        print("  Failed case_normal (should be True)")
+        return False
+    if check_nested_folders(case_root_file):
+        print("  Failed case_root_file (should be False)")
+        return False
+    if not check_nested_folders(case_rar_dir):
+        print("  Failed case_rar_dir (should be True)")
+        return False
+    if not check_nested_folders(case_zip_dir):
+        print("  Failed case_zip_dir (should be True)")
+        return False
+        
+    print("  Nested Folder Detection SUCCESS")
+    return True
+
 if __name__ == "__main__":
     success = True
     if not test_matching_logic(): success = False
     print("-" * 20)
     if not test_long_name_logic(): success = False
+    print("-" * 20)
+    if not test_nested_folder_logic(): success = False
     print("-" * 20)
     
     if success:

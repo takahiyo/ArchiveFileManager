@@ -13,16 +13,17 @@ import logging
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from gui import ArchiveFileManagerGUI
+import config
 
 def main():
-    # ログ出力先の設定
+    # ログ出力先の設定（実行ファイルと同じパスに archive_cleaner.log を出力）
+    log_file = os.path.join(config.get_exe_dir(), "archive_cleaner.log")
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,
         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
         handlers=[
             logging.StreamHandler(),
-            # 実行ファイルと同じ場所にログを出す場合はここを有効に
-            # logging.FileHandler("app.log", encoding="utf-8")
+            logging.FileHandler(log_file, encoding="utf-8")
         ]
     )
     

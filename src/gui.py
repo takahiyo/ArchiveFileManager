@@ -12,8 +12,10 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import logging
 import datetime
+from functools import partial
 
 import config
+from ui_settings import load_settings, save_settings
 from archive_handler import scan_archives, batch_convert
 from empty_folder_scanner import scan_empty_folders, delete_folders
 from archive_content_cleaner import scan_archives_for_cleaning, batch_clean_archives
@@ -27,8 +29,8 @@ class ArchiveFileManagerGUI:
     def __init__(self, root):
         self.root = root
         self.root.title(f"{config.APP_NAME} v{config.APP_VERSION}")
-        self.root.geometry("640x720")
-        self.root.minsize(600, 650)
+        self.root.geometry(f"{config.DEFAULT_WINDOW_WIDTH}x{config.DEFAULT_WINDOW_HEIGHT}")
+        self.root.minsize(900, 700)
         
         # 処理状態管理
         self.is_running = False
@@ -37,6 +39,8 @@ class ArchiveFileManagerGUI:
         # 空フォルダ検索結果の保持用
         self.empty_folders_data = []  # 全データ
         self.sort_column = "path"
+        self.dir_history = []
+        self._load_history()
         self.sort_reverse = False
         
         # スタイル設定
@@ -47,7 +51,77 @@ class ArchiveFileManagerGUI:
         self.style.configure("Bold.TCheckbutton", font=("MS Gothic", 9, "bold"))
         
         self._setup_ui()
+        self._restore_settings()
+        self.root.protocol("WM_DELETE_WINDOW", self._close)
         self._check_env()
+
+    def _restore_settings(self):
+        """保存済みの入力値を戻し、表示状態と保存イベントを設定する。"""
+        self._saved_vars = {
+            name: value for name, value in vars(self).items()
+            if isinstance(value, (tk.BooleanVar, tk.StringVar))
+            and name not in ('clean_pat_var', 'clean_status_var')
+        }
+        settings = load_settings()
+        for name, variable in self._saved_vars.items():
+            if name in settings:
+                try:
+                    if isinstance(variable, tk.BooleanVar):
+                        if settings[name] not in ('True', 'False', '0', '1'):
+                            continue
+                        variable.set(settings[name] in ('True', '1'))
+                    else:
+                        variable.set(settings[name])
+                except tk.TclError:
+                    pass
+        self.clean_date_filter_combo.set(settings.get('date_filter', '30日以内'))
+        self._toggle_clean_patterns_widget()
+        self._toggle_nesting_options()
+        self._toggle_clean_date_widgets()
+        self._on_target_fmt_changed()
+        self.root.update_idletasks()
+        width = max(config.DEFAULT_WINDOW_WIDTH, self.root.winfo_reqwidth())
+        height = max(config.DEFAULT_WINDOW_HEIGHT, self.root.winfo_reqheight())
+        try:
+            width = max(self.root.winfo_reqwidth(), int(settings.get('width', width)))
+            height = max(self.root.winfo_reqheight(), int(settings.get('height', height)))
+        except ValueError:
+            pass
+        self.root.geometry(f'{min(width, self.root.winfo_screenwidth())}x{min(height, self.root.winfo_screenheight() - 80)}')
+        if settings.get('maximized') == 'True' or height > self.root.winfo_screenheight() - 80:
+            self.root.state('zoomed')
+        for variable in self._saved_vars.values():
+            variable.trace_add('write', self._persist_settings)
+        self.clean_date_filter_combo.bind('<<ComboboxSelected>>', self._persist_settings, add='+')
+
+    def _persist_settings(self, *args):
+        """チェック状態・入力値・現在のウィンドウサイズを保存する。"""
+        values = {name: variable.get() for name, variable in self._saved_vars.items()}
+        values.update(date_filter=self.clean_date_filter_combo.get(),
+                      width=self.root.winfo_width(), height=self.root.winfo_height(),
+                      maximized=self.root.state() == 'zoomed')
+        save_settings(values)
+
+    def _close(self):
+        """最後のサイズを保存して画面を終了する。"""
+        self._persist_settings()
+        self.root.destroy()
+
+    def _show_filename_options(self):
+        """ファイル名整理の各項目を選択するダイアログを開く。"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title('ファイル名整理')
+        dialog.transient(self.root)
+        frame = ttk.Frame(dialog, padding=20)
+        frame.pack(fill=tk.BOTH, expand=True)
+        for label, variable in [
+            ('半角 ! を全角 ！ に変換する（書庫名・書庫内の名前）', self.clean_symbols_var),
+            ('長すぎるファイル名を短縮する', self.clean_shorten_var),
+            ('拡張子を自動補正する', self.clean_fix_ext_var),
+        ]:
+            ttk.Checkbutton(frame, text=label, variable=variable).pack(anchor='w', pady=6)
+        ttk.Button(frame, text='閉じる', command=dialog.destroy).pack(anchor='e', pady=(12, 0))
+        dialog.grab_set()
 
     def _setup_ui(self):
         """UIコンポーネントの配置"""
@@ -58,142 +132,52 @@ class ArchiveFileManagerGUI:
         self.notebook = ttk.Notebook(main_frame)
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
-        # タブ1: 圧縮変換
-        self.tab_convert = ttk.Frame(self.notebook, padding="10")
-        self.notebook.add(self.tab_convert, text=" 📦 圧縮変換 ")
-        self._setup_convert_tab(self.tab_convert)
+        # タブ1: 書庫クリーン・変換
+        self.tab_clean = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(self.tab_clean, text=" 🧹 書庫クリーン・変換 ")
+        self._setup_clean_tab(self.tab_clean)
 
         # タブ2: 空フォルダ
         self.tab_empty = ttk.Frame(self.notebook, padding="10")
         self.notebook.add(self.tab_empty, text=" 🗂 空フォルダ ")
         self._setup_empty_tab(self.tab_empty)
-        
-        # タブ3: 書庫クリーン
-        self.tab_clean = ttk.Frame(self.notebook, padding="10")
-        self.notebook.add(self.tab_clean, text=" 🧹 書庫クリーン ")
-        self._setup_clean_tab(self.tab_clean)
-
-    # -------------------------------------------------------------------------
-    # タブ1: 圧縮変換
-    # -------------------------------------------------------------------------
-    def _setup_convert_tab(self, parent):
-        # --- フォルダ選択 ---
-        dir_frame = ttk.LabelFrame(parent, text=" 対象フォルダ ", padding="10")
-        dir_frame.pack(fill=tk.X, pady=(0, 15))
-
-        self.dir_path_var = tk.StringVar()
-        dir_entry = ttk.Entry(dir_frame, textvariable=self.dir_path_var)
-        dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
-        
-        ref_btn = ttk.Button(dir_frame, text="参照...", command=partial(self._browse_folder, self.dir_path_var))
-        ref_btn.pack(side=tk.RIGHT)
-
-        # --- 設定エリア ---
-        settings_frame = ttk.LabelFrame(parent, text=" 変換設定 ", padding="10")
-        settings_frame.pack(fill=tk.X, pady=(0, 15))
-
-        # 変換形式
-        fmt_frame = ttk.Frame(settings_frame)
-        fmt_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(fmt_frame, text="変換先の形式:").pack(side=tk.LEFT, padx=(0, 10))
-        
-        self.target_fmt_var = tk.StringVar(value="ZIP")
-        for fmt in config.TARGET_FORMATS.keys():
-            ttk.Radiobutton(fmt_frame, text=fmt, value=fmt, variable=self.target_fmt_var).pack(side=tk.LEFT, padx=5)
-
-        # 圧縮率
-        level_frame = ttk.Frame(settings_frame)
-        level_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(level_frame, text="圧縮率:").pack(side=tk.LEFT, padx=(0, 10))
-        
-        self.comp_level_var = tk.StringVar(value="標準")
-        level_combo = ttk.Combobox(level_frame, textvariable=self.comp_level_var, values=config.COMPRESSION_LEVEL_NAMES, state="readonly", width=10)
-        level_combo.pack(side=tk.LEFT)
-
-        # オプション
-        opt_frame = ttk.Frame(settings_frame)
-        opt_frame.pack(fill=tk.X, pady=(10, 0))
-
-        self.recursive_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opt_frame, text="下層フォルダも対象にする", variable=self.recursive_var).pack(anchor=tk.W, pady=2)
-
-        self.flatten_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opt_frame, text="フォルダ階層の余分な入れ子を解消する", variable=self.flatten_var).pack(anchor=tk.W, pady=2)
-
-        self.fix_ext_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opt_frame, text="拡張子が間違っていたら自動で直す", variable=self.fix_ext_var).pack(anchor=tk.W, pady=2)
-
-        self.delete_orig_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opt_frame, text="変換後に元ファイルを削除する (注意)", variable=self.delete_orig_var).pack(anchor=tk.W, pady=2)
-
-        self.preserve_timestamp_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opt_frame, text="変換後ファイルのタイムスタンプを据え置く", variable=self.preserve_timestamp_var).pack(anchor=tk.W, pady=2)
-
-        # --- 実行ボタン ---
-        btn_frame = ttk.Frame(parent)
-        btn_frame.pack(fill=tk.X, pady=(0, 15))
-
-        self.start_btn = ttk.Button(btn_frame, text="▶ 処理開始", command=self._start_convert_process, style="Accent.TButton")
-        self.start_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
-        
-        self.cancel_btn = ttk.Button(btn_frame, text="キャンセル", command=self._request_cancel, state=tk.DISABLED)
-        self.cancel_btn.pack(side=tk.RIGHT)
-
-        # --- ログ表示 ---
-        log_frame = ttk.LabelFrame(parent, text=" 処理ログ ", padding="5")
-        log_frame.pack(fill=tk.BOTH, expand=True)
-
-        self.log_text = tk.Text(log_frame, height=10, font=("Consolas", 9), state=tk.DISABLED, bg="#f0f0f0")
-        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.log_text.configure(yscrollcommand=scrollbar.set)
-
-        # --- 進捗バー ---
-        progress_frame = ttk.Frame(parent)
-        progress_frame.pack(fill=tk.X, pady=(10, 0))
-
-        self.progress_var = tk.DoubleVar()
-        self.progress_bar = ttk.Progressbar(progress_frame, variable=self.progress_var, maximum=100)
-        self.progress_bar.pack(fill=tk.X, side=tk.TOP)
-        
-        self.status_var = tk.StringVar(value="待機中...")
-        ttk.Label(progress_frame, textvariable=self.status_var, style="Status.TLabel").pack(side=tk.LEFT, pady=2)
-
-    # -------------------------------------------------------------------------
-    # タブ2: 空フォルダ
-    # -------------------------------------------------------------------------
     def _setup_empty_tab(self, parent):
-        top_frame = ttk.Frame(parent)
-        top_frame.pack(fill=tk.X, pady=(0, 10))
+        dir_frame = ttk.LabelFrame(parent, text=" 対象フォルダ ", padding="10")
+        dir_frame.pack(fill=tk.X, pady=(0, 10))
 
-        # フォルダ選択
+        path_frame = ttk.Frame(dir_frame)
+        path_frame.pack(fill=tk.X)
         self.empty_dir_var = tk.StringVar()
-        ttk.Label(top_frame, text="対象フォルダ:").pack(side=tk.LEFT)
-        ttk.Entry(top_frame, textvariable=self.empty_dir_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        ttk.Button(top_frame, text="参照...", command=partial(self._browse_folder, self.empty_dir_var)).pack(side=tk.LEFT)
+        self.empty_dir_combo = ttk.Combobox(path_frame, textvariable=self.empty_dir_var, values=self.dir_history)
+        self.empty_dir_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        ttk.Button(path_frame, text="参照...", command=partial(self._browse_folder, self.empty_dir_var)).pack(side=tk.RIGHT)
         
-        # 検索ボタン
-        ttk.Button(top_frame, text="🔍 検索開始", command=self._scan_empty_folders).pack(side=tk.LEFT, padx=(10, 0))
-
         # フィルタ
-        filter_frame = ttk.Frame(parent)
-        filter_frame.pack(fill=tk.X, pady=(0, 5))
+        filter_frame = ttk.LabelFrame(parent, text=" フィルタ ", padding="10")
+        filter_frame.pack(fill=tk.X, pady=(0, 10))
         
-        ttk.Label(filter_frame, text="フィルタ(名前):").pack(side=tk.LEFT)
+        f_inner = ttk.Frame(filter_frame)
+        f_inner.pack(fill=tk.X)
+        ttk.Label(f_inner, text="フィルタ(名前):").pack(side=tk.LEFT)
         self.filter_var = tk.StringVar()
         self.filter_var.trace("w", self._apply_filter)
-        ttk.Entry(filter_frame, textvariable=self.filter_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        ttk.Entry(f_inner, textvariable=self.filter_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        # 結果表示エリア
+        res_frame = ttk.Frame(parent)
+        res_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
         
-        self.count_label = ttk.Label(filter_frame, text="件数: 0件")
-        self.count_label.pack(side=tk.RIGHT)
+        scan_btn_frame = ttk.Frame(res_frame)
+        scan_btn_frame.pack(fill=tk.X, pady=(0, 5))
+        ttk.Button(scan_btn_frame, text="🔍 スキャン（プレビュー）", command=self._scan_empty_folders).pack(side=tk.LEFT)
+        self.count_label = ttk.Label(scan_btn_frame, text="件数: 0件")
+        self.count_label.pack(side=tk.LEFT, padx=10)
 
         # 一覧リスト (Treeview)
-        tree_frame = ttk.Frame(parent)
-        tree_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        tree_container = ttk.Frame(res_frame)
+        tree_container.pack(fill=tk.BOTH, expand=True)
 
-        self.tree = ttk.Treeview(tree_frame, columns=("checked", "name", "path", "modified"), show="headings", selectmode="extended")
+        self.tree = ttk.Treeview(tree_container, columns=("checked", "name", "path", "modified"), show="headings", selectmode="extended")
         
         # ヘッダー設定
         self.tree.heading("checked", text="☑", command=lambda: self._sort_tree("checked"))
@@ -206,68 +190,140 @@ class ArchiveFileManagerGUI:
         self.tree.column("path", width=300, anchor="w")
         self.tree.column("modified", width=120, anchor="w")
 
-        scrollbar_y = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
-        self.tree.configure(yscroll=scrollbar_y.set)
-        
-        scrollbar_x = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
-        self.tree.configure(xscroll=scrollbar_x.set)
+        scrollbar_y = ttk.Scrollbar(tree_container, orient=tk.VERTICAL, command=self.tree.yview)
+        scrollbar_x = ttk.Scrollbar(tree_container, orient=tk.HORIZONTAL, command=self.tree.xview)
+        self.tree.configure(yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
 
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar_y.pack(side=tk.RIGHT, fill=tk.Y)
         scrollbar_x.pack(side=tk.BOTTOM, fill=tk.X)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # ダブルクリックでチェック切り替え
+        # ダブルクリックでチェック切り替えなど
         self.tree.bind("<Double-1>", self._on_tree_double_click)
-        # シングルクリックでチェック切り替え（簡易実装）
         self.tree.bind("<ButtonRelease-1>", self._on_tree_click)
 
-        # 下部ボタン類
-        bottom_frame = ttk.Frame(parent)
-        bottom_frame.pack(fill=tk.X, pady=10)
+        btn_select_frame = ttk.Frame(res_frame)
+        btn_select_frame.pack(fill=tk.X, pady=(5, 0))
+        ttk.Button(btn_select_frame, text="全選択", command=self._select_all).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_select_frame, text="全解除", command=self._deselect_all).pack(side=tk.LEFT)
 
-        ttk.Button(bottom_frame, text="全選択", command=self._select_all).pack(side=tk.LEFT, padx=5)
-        ttk.Button(bottom_frame, text="全解除", command=self._deselect_all).pack(side=tk.LEFT, padx=5)
-        
-        self.delete_btn = ttk.Button(bottom_frame, text="選択したフォルダを削除", command=self._delete_selected, state=tk.DISABLED)
-        self.delete_btn.pack(side=tk.RIGHT, padx=5)
+        exec_frame = ttk.Frame(parent)
+        exec_frame.pack(fill=tk.X, pady=(0, 10))
+        self.delete_btn = ttk.Button(exec_frame, text="▶ 選択したフォルダを削除", command=self._delete_selected, state=tk.DISABLED, style="Accent.TButton")
+        self.delete_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
     # -------------------------------------------------------------------------
     # タブ3: 書庫クリーン
     # -------------------------------------------------------------------------
     def _setup_clean_tab(self, parent):
-        # 内部状態
         self.clean_scan_results = []
         
-        # --- 対象フォルダ ---
         dir_frame = ttk.LabelFrame(parent, text=" 対象フォルダ ", padding="10")
         dir_frame.pack(fill=tk.X, pady=(0, 10))
 
+        path_frame = ttk.Frame(dir_frame)
+        path_frame.pack(fill=tk.X)
         self.clean_dir_var = tk.StringVar()
-        ttk.Entry(dir_frame, textvariable=self.clean_dir_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
-        ttk.Button(dir_frame, text="参照...", command=partial(self._browse_folder, self.clean_dir_var)).pack(side=tk.RIGHT)
+        self.clean_dir_combo = ttk.Combobox(path_frame, textvariable=self.clean_dir_var, values=self.dir_history)
+        self.clean_dir_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        ttk.Button(path_frame, text="参照...", command=partial(self._browse_folder, self.clean_dir_var)).pack(side=tk.RIGHT)
         
-        # オプション群
         opt_frame = ttk.Frame(dir_frame)
-        opt_frame.pack(fill=tk.X, pady=(5, 0))
+        opt_frame.pack(fill=tk.X, pady=(8, 0))
         self.clean_recursive_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opt_frame, text="下層フォルダも対象にする", variable=self.clean_recursive_var).pack(side=tk.LEFT, padx=(0, 10))
-        self.clean_nesting_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opt_frame, text="余分な入れ子を解消する", variable=self.clean_nesting_var).pack(side=tk.LEFT, padx=(0, 10))
-        self.clean_shorten_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opt_frame, text="長すぎる名前を短縮する", variable=self.clean_shorten_var).pack(side=tk.LEFT)
+        ttk.Checkbutton(opt_frame, text="下層フォルダも対象にする", variable=self.clean_recursive_var).pack(side=tk.LEFT, padx=(0, 15))
 
-        # --- 除外パターン設定 ---
-        pat_frame = ttk.LabelFrame(parent, text=" 削除パターン設定 ", padding="10")
-        pat_frame.pack(fill=tk.X, pady=(0, 10))
+        self.clean_date_filter_enabled_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(opt_frame, text="更新日時で絞り込む", variable=self.clean_date_filter_enabled_var, command=self._toggle_clean_date_widgets).pack(side=tk.LEFT, padx=(0, 5))
+        self.clean_date_filter_combo = ttk.Combobox(opt_frame, values=["7日以内", "30日以内", "90日以内", "365日以内", "カスタム"], state="readonly", width=12)
+        self.clean_date_filter_combo.set("30日以内")
+        self.clean_date_filter_combo.pack(side=tk.LEFT, padx=5)
+        self.clean_date_filter_combo.bind("<<ComboboxSelected>>", self._on_clean_date_combo_changed)
         
-        pat_input_frame = ttk.Frame(pat_frame)
+        self.clean_custom_days_frame = ttk.Frame(opt_frame)
+        self.clean_custom_days_frame.pack(side=tk.LEFT)
+        self.clean_custom_days_var = tk.StringVar(value="14")
+        self.clean_custom_days_entry = ttk.Entry(self.clean_custom_days_frame, textvariable=self.clean_custom_days_var, width=5)
+        self.clean_custom_days_entry.pack(side=tk.LEFT)
+        ttk.Label(self.clean_custom_days_frame, text="日以内").pack(side=tk.LEFT, padx=2)
+
+        # 抽出・処理条件
+        cond_frame = ttk.LabelFrame(parent, text=" 抽出・処理条件 ", padding="10")
+        cond_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # 退避書庫の除外設定も既存の BooleanVar 自動保存に含める。
+        self.clean_exclude_original_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(cond_frame, text="_Original を含む書庫を対象外にする", variable=self.clean_exclude_original_var).pack(anchor="w", pady=(0, 4))
+
+        cond_top_frame = ttk.Frame(cond_frame)
+        cond_top_frame.pack(fill=tk.X, pady=(0, 4))
+        
+        self.clean_do_clean_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(cond_top_frame, text="指定パターンの不要ファイルを削除する", variable=self.clean_do_clean_var, command=self._toggle_clean_patterns_widget).pack(side=tk.LEFT, anchor="n", padx=(0, 25))
+
+        nest_block = ttk.Frame(cond_top_frame)
+        nest_block.pack(side=tk.LEFT, anchor="n")
+
+        self.clean_nesting_var = tk.BooleanVar(value=True)
+        self.clean_nesting_chk = ttk.Checkbutton(
+            nest_block, 
+            text="余分な入れ子を解消する", 
+            variable=self.clean_nesting_var, 
+            command=self._toggle_nesting_options
+        )
+        self.clean_nesting_chk.pack(anchor="w")
+        
+        self.clean_chapter_organize_var = tk.BooleanVar(value=True)
+        self.clean_chapter_organize_chk = ttk.Checkbutton(
+            nest_block, 
+            text="└ 話数別に整理（Cover優先・連番化・階層解消）", 
+            variable=self.clean_chapter_organize_var
+        )
+        self.clean_chapter_organize_chk.pack(anchor="w", padx=(15, 0), pady=(2, 0))
+
+        cond_bot_frame = ttk.Frame(cond_frame)
+        cond_bot_frame.pack(fill=tk.X, pady=(4, 0))
+
+        self.clean_shorten_var = tk.BooleanVar(value=True)
+        
+        self.clean_fix_ext_var = tk.BooleanVar(value=True)
+        self.clean_symbols_var = tk.BooleanVar(value=True)
+        ttk.Button(cond_bot_frame, text="ファイル名整理...", command=self._show_filename_options).pack(side=tk.LEFT, padx=(0, 15))
+        
+        self.clean_preserve_timestamp_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(cond_bot_frame, text="タイムスタンプを維持する", variable=self.clean_preserve_timestamp_var).pack(side=tk.LEFT)
+
+        out_frame = ttk.LabelFrame(parent, text=" 出力設定 (出力形式・圧縮率) ", padding="10")
+        out_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        fmt_frame = ttk.Frame(out_frame)
+        fmt_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(fmt_frame, text="出力フォーマット:").pack(side=tk.LEFT, padx=(0, 5))
+        self.target_fmt_var = tk.StringVar(value="元の形式を維持")
+        fmt_values = ["元の形式を維持", "ZIP", "RAR", "7z"]
+        self.target_fmt_combo = ttk.Combobox(fmt_frame, textvariable=self.target_fmt_var, values=fmt_values, state="readonly", width=18)
+        self.target_fmt_combo.pack(side=tk.LEFT, padx=(0, 15))
+        self.target_fmt_combo.bind("<<ComboboxSelected>>", self._on_target_fmt_changed)
+        
+        ttk.Label(fmt_frame, text="圧縮レベル:").pack(side=tk.LEFT, padx=(0, 5))
+        self.comp_level_var = tk.StringVar(value="無圧縮")
+        self.comp_level_combo = ttk.Combobox(fmt_frame, textvariable=self.comp_level_var, values=config.COMPRESSION_LEVEL_NAMES, state="readonly", width=10)
+        self.comp_level_combo.pack(side=tk.LEFT, padx=(0, 15))
+        
+        self.delete_orig_var = tk.BooleanVar(value=False)
+        self.delete_orig_chk = ttk.Checkbutton(fmt_frame, text="変換後に元ファイルを削除する", variable=self.delete_orig_var)
+        self.delete_orig_chk.pack(side=tk.LEFT)
+
+        self.pat_frame = ttk.LabelFrame(parent, text=" 削除パターン設定 ", padding="10")
+        self.pat_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        pat_input_frame = ttk.Frame(self.pat_frame)
         pat_input_frame.pack(fill=tk.X, pady=(0, 5))
         self.clean_pat_var = tk.StringVar()
         ttk.Entry(pat_input_frame, textvariable=self.clean_pat_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
         ttk.Button(pat_input_frame, text="追加", command=self._add_clean_pattern).pack(side=tk.RIGHT)
         
-        # パターンリスト表示
-        list_frame = ttk.Frame(pat_frame)
+        list_frame = ttk.Frame(self.pat_frame)
         list_frame.pack(fill=tk.BOTH, expand=True)
         self.clean_pat_listbox = tk.Listbox(list_frame, height=4, selectmode=tk.SINGLE)
         self.clean_pat_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -280,9 +336,8 @@ class ArchiveFileManagerGUI:
         ttk.Button(pat_btn_frame, text="削除", command=self._remove_clean_pattern).pack(fill=tk.X, pady=(0, 5))
         ttk.Button(pat_btn_frame, text="リセット", command=self._reset_clean_patterns).pack(fill=tk.X)
         
-        self._reset_clean_patterns() # 初期化
+        self._reset_clean_patterns()
 
-        # --- スキャン＆結果 ---
         res_frame = ttk.Frame(parent)
         res_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
         
@@ -293,21 +348,46 @@ class ArchiveFileManagerGUI:
         self.clean_res_label = ttk.Label(scan_btn_frame, text="待機中...")
         self.clean_res_label.pack(side=tk.LEFT, padx=10)
 
-        # 結果Treeview
-        self.clean_tree = ttk.Treeview(res_frame, columns=("archive", "files", "nest_shorten"), show="headings", height=5)
-        self.clean_tree.heading("archive", text="書庫名")
-        self.clean_tree.heading("files", text="削除対象ファイル")
-        self.clean_tree.heading("nest_shorten", text="階層/名前修正")
-        self.clean_tree.column("archive", width=200, anchor="w")
-        self.clean_tree.column("files", width=200, anchor="w")
-        self.clean_tree.column("nest_shorten", width=80, anchor="center")
-        
-        clean_scroll = ttk.Scrollbar(res_frame, orient=tk.VERTICAL, command=self.clean_tree.yview)
-        self.clean_tree.configure(yscrollcommand=clean_scroll.set)
-        self.clean_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        clean_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        tree_container = ttk.Frame(res_frame)
+        tree_container.pack(fill=tk.BOTH, expand=True)
 
-        # --- 実行ボタン ---
+        self.clean_tree = ttk.Treeview(tree_container, columns=("checked", "archive", "path", "clean", "nest_shorten", "convert", "mtime"), show="headings", height=5)
+        self.clean_tree.heading("checked", text="☑", command=lambda: self._sort_clean_tree("checked"))
+        self.clean_tree.heading("archive", text="書庫名", command=lambda: self._sort_clean_tree("archive"))
+        self.clean_tree.heading("path", text="フルパス", command=lambda: self._sort_clean_tree("path"))
+        self.clean_tree.heading("clean", text="クリーン削除", command=lambda: self._sort_clean_tree("clean"))
+        self.clean_tree.heading("nest_shorten", text="階層/名前", command=lambda: self._sort_clean_tree("nest_shorten"))
+        self.clean_tree.heading("convert", text="変換", command=lambda: self._sort_clean_tree("convert"))
+        self.clean_tree.heading("mtime", text="更新日時", command=lambda: self._sort_clean_tree("mtime"))
+        
+        self.clean_tree.column("checked", width=40, anchor="center", stretch=False)
+        self.clean_tree.column("archive", width=200, anchor="w")
+        self.clean_tree.column("path", width=300, anchor="w")
+        self.clean_tree.column("clean", width=120, anchor="center")
+        self.clean_tree.column("nest_shorten", width=100, anchor="center")
+        self.clean_tree.column("convert", width=130, anchor="center")
+        self.clean_tree.column("mtime", width=120, anchor="w")
+        
+        clean_scroll_y = ttk.Scrollbar(tree_container, orient=tk.VERTICAL, command=self.clean_tree.yview)
+        clean_scroll_x = ttk.Scrollbar(tree_container, orient=tk.HORIZONTAL, command=self.clean_tree.xview)
+        self.clean_tree.configure(yscrollcommand=clean_scroll_y.set, xscrollcommand=clean_scroll_x.set)
+
+        clean_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        clean_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        self.clean_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.clean_tree.bind("<Double-1>", self._on_clean_tree_double_click)
+        self.clean_tree.bind("<ButtonRelease-1>", self._on_clean_tree_click)
+
+        btn_select_frame = ttk.Frame(res_frame)
+        btn_select_frame.pack(fill=tk.X, pady=(5, 0))
+        ttk.Button(btn_select_frame, text="全選択", command=self._clean_select_all).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_select_frame, text="全解除", command=self._clean_deselect_all).pack(side=tk.LEFT)
+
+        self._toggle_clean_date_widgets()
+        self._on_target_fmt_changed()
+        self._toggle_clean_patterns_widget()
+
         exec_frame = ttk.Frame(parent)
         exec_frame.pack(fill=tk.X, pady=(0, 10))
         self.clean_exec_btn = ttk.Button(exec_frame, text="▶ 処理実行", command=self._execute_clean, state=tk.DISABLED, style="Accent.TButton")
@@ -315,19 +395,23 @@ class ArchiveFileManagerGUI:
         self.clean_cancel_btn = ttk.Button(exec_frame, text="キャンセル", command=self._request_cancel, state=tk.DISABLED)
         self.clean_cancel_btn.pack(side=tk.RIGHT)
         
-        # 進捗バー（共有）
+        log_frame = ttk.LabelFrame(parent, text=" 処理ログ ", padding="5")
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        self.log_text = tk.Text(log_frame, height=5, font=("Consolas", 9), state=tk.DISABLED, bg="#f0f0f0")
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log_text.configure(yscrollcommand=scrollbar.set)
+
         prog_frame = ttk.Frame(parent)
         prog_frame.pack(fill=tk.X)
         self.clean_prog_var = tk.DoubleVar()
         self.clean_prog = ttk.Progressbar(prog_frame, variable=self.clean_prog_var, maximum=100)
         self.clean_prog.pack(fill=tk.X, side=tk.TOP)
-        self.clean_status_var = tk.StringVar(value="")
+        self.clean_status_var = tk.StringVar(value="待機中...")
         ttk.Label(prog_frame, textvariable=self.clean_status_var, style="Status.TLabel").pack(side=tk.LEFT, pady=2)
-
-
-    # -------------------------------------------------------------------------
-    # 共通・ユーティリティ
-    # -------------------------------------------------------------------------
     def _check_env(self):
         """環境チェック"""
         errors = config.validate_environment()
@@ -335,12 +419,25 @@ class ArchiveFileManagerGUI:
             msg = "環境に問題が見つかりました:\n\n" + "\n".join(errors)
             messagebox.showerror("環境エラー", msg)
             self._log("環境エラー: " + ", ".join(errors))
-            self.start_btn.config(state=tk.DISABLED)
+            self.clean_exec_btn.config(state=tk.DISABLED)
 
     def _browse_folder(self, target_var):
         path = filedialog.askdirectory()
         if path:
-            target_var.set(os.path.normpath(path))
+            norm_path = os.path.normpath(path)
+            current_val = target_var.get().strip()
+            if current_val:
+                # すでに入力がある場合、追加するか上書きするか確認する
+                if messagebox.askyesno("フォルダの追加", "新しく選択したフォルダを追加しますか？\n（「いいえ」を選ぶと現在の内容を上書きします）"):
+                    # 既存のパスリストを取得
+                    existing_paths = [p.strip() for p in current_val.split(";") if p.strip()]
+                    if norm_path not in existing_paths:
+                        existing_paths.append(norm_path)
+                    target_var.set(";".join(existing_paths))
+                else:
+                    target_var.set(norm_path)
+            else:
+                target_var.set(norm_path)
 
     def _log(self, message):
         """ログを追加（圧縮タブ用）"""
@@ -353,101 +450,24 @@ class ArchiveFileManagerGUI:
     # -------------------------------------------------------------------------
     # 圧縮変換ロジック
     # -------------------------------------------------------------------------
-    def _update_progress(self, current, total):
-        percent = (current / total) * 100
-        self.progress_var.set(percent)
-        self.status_var.set(f"処理中... {current} / {total} ({int(percent)}%)")
-
     def _request_cancel(self):
         if messagebox.askyesno("キャンセル", "処理を中断しますか？"):
             self.cancel_requested = True
             self._log("!!! 中断リクエストを受け付けました。現在の処理が完了次第停止します。")
-            self.cancel_btn.config(state=tk.DISABLED)
+            self.clean_cancel_btn.config(state=tk.DISABLED)
 
-    def _start_convert_process(self):
-        path = self.dir_path_var.get()
-        if not path or not os.path.isdir(path):
-            messagebox.showwarning("入力エラー", "対象フォルダを正しく指定してください。")
-            return
-
-        self.is_running = True
-        self.cancel_requested = False
-        self.start_btn.config(state=tk.DISABLED)
-        self.cancel_btn.config(state=tk.NORMAL)
-        self.progress_var.set(0)
-        
-        self.log_text.config(state=tk.NORMAL)
-        self.log_text.delete(1.0, tk.END)
-        self.log_text.config(state=tk.DISABLED)
-
-        target_fmt = self.target_fmt_var.get()
-        level_name = self.comp_level_var.get()
-        comp_level = COMPRESSION_LEVELS.get(level_name, 3)
-        
-        opts = {
-            "recursive": self.recursive_var.get(),
-            "target_format": target_fmt,
-            "compression_level": comp_level,
-            "fix_extensions": self.fix_ext_var.get(),
-            "flatten_folders": self.flatten_var.get(),
-            "delete_original": self.delete_orig_var.get(),
-            "preserve_timestamp": self.preserve_timestamp_var.get(),
-        }
-
-        threading.Thread(target=self._run_convert_batch, args=(path, opts), daemon=True).start()
-
-    def _run_convert_batch(self, path, opts):
-        try:
-            self.status_var.set("ファイルを検索中...")
-            archives = scan_archives(path, opts["recursive"])
-            
-            if not archives:
-                self.root.after(0, lambda: messagebox.showinfo("完了", "対象の圧縮ファイルが見つかりませんでした。"))
-                self._finish_convert_process()
-                return
-
-            self._log(f"処理対象: {len(archives)} 件")
-            
-            batch_convert(
-                archive_list=archives,
-                target_format=opts["target_format"],
-                compression_level=opts["compression_level"],
-                fix_extensions=opts["fix_extensions"],
-                flatten_folders=opts["flatten_folders"],
-                delete_original=opts["delete_original"],
-                preserve_timestamp=opts["preserve_timestamp"],
-                progress_callback=lambda c, t: self.root.after(0, self._update_progress, c, t),
-                log_callback=lambda msg: self.root.after(0, self._log, msg),
-                cancel_check=lambda: self.cancel_requested
-            )
-            
-            if self.cancel_requested:
-                self.status_var.set("中断されました")
-            else:
-                self.status_var.set("完了")
-                self.root.after(0, lambda: messagebox.showinfo("完了", "すべての処理が終了しました。"))
-
-        except Exception as e:
-            self._log(f"エラー発生: {str(e)}")
-            self.root.after(0, lambda: messagebox.showerror("エラー", f"予期せぬエラーが発生しました:\n{str(e)}"))
-        
-        self._finish_convert_process()
-
-    def _finish_convert_process(self):
-        self.is_running = False
-        self.start_btn.config(state=tk.NORMAL)
-        self.cancel_btn.config(state=tk.DISABLED)
-        if not self.cancel_requested:
-            self.status_var.set("待機中")
-
-    # -------------------------------------------------------------------------
-    # 空フォルダロジック
-    # -------------------------------------------------------------------------
     def _scan_empty_folders(self):
         path = self.empty_dir_var.get()
-        if not path or not os.path.isdir(path):
-            messagebox.showwarning("入力エラー", "対象フォルダを正しく指定してください。")
+        paths = [p.strip() for p in path.split(";") if p.strip()]
+        if not paths:
+            messagebox.showwarning("入力エラー", "対象フォルダを指定してください。")
             return
+        for p in paths:
+            if not os.path.isdir(p):
+                messagebox.showwarning("入力エラー", f"フォルダが存在しません:\n{p}")
+                return
+
+        self._add_to_history(path)
 
         # 初期化
         self.tree.delete(*self.tree.get_children())
@@ -589,18 +609,27 @@ class ArchiveFileManagerGUI:
         if not targets:
             return
             
-        if not messagebox.askyesno("削除確認", f"{len(targets)} 件の空フォルダを削除します。\nよろしいですか？\n（ごみ箱には入らず、完全に削除されます）"):
+        if not messagebox.askyesno("削除確認", f"{len(targets)} 件の空フォルダを削除します。\nよろしいですか？\n（フォルダはごみ箱へ移動されます）"):
             return
             
         # 削除実行
         results = delete_folders(targets)
         
         success_count = sum(1 for r in results if r["success"])
-        fail_count = len(results) - success_count
+        failed_results = [r for r in results if not r["success"]]
+        fail_count = len(failed_results)
         
         msg = f"削除完了: {success_count}件"
         if fail_count > 0:
-            msg += f"\n失敗: {fail_count}件\n詳細はログをご確認ください（未実装）"
+            msg += f"\n\n▼ 削除失敗: {fail_count}件"
+            msg += "\n----------------------------------------"
+            for r in failed_results[:5]:
+                folder_name = os.path.basename(r["path"])
+                msg += f"\n・{folder_name} :\n  {r['message']}"
+            if fail_count > 5:
+                msg += f"\n・他 {fail_count - 5} 件..."
+            msg += "\n----------------------------------------"
+            msg += "\n※フォルダが別のアプリで開かれているか、権限がない可能性があります。"
             
         messagebox.showinfo("完了", msg)
         
@@ -616,40 +645,89 @@ class ArchiveFileManagerGUI:
     # -------------------------------------------------------------------------
     # 書庫クリーン ロジック
     # -------------------------------------------------------------------------
-    def _add_clean_pattern(self):
-        pat = self.clean_pat_var.get().strip()
-        if not pat:
-            return
-        # 重複チェック
-        current = self.clean_pat_listbox.get(0, tk.END)
-        if pat not in current:
-            self.clean_pat_listbox.insert(tk.END, pat)
-            self.clean_pat_var.set("") # クリア
-            # 外部ファイルに保存
-            config.save_clean_patterns(self._get_current_patterns())
+    def _on_target_fmt_changed(self, event=None):
+        if self.target_fmt_var.get() == "元の形式を維持":
+            self.delete_orig_var.set(False)
+            self.delete_orig_chk.configure(state=tk.DISABLED)
+        else:
+            self.delete_orig_chk.configure(state=tk.NORMAL)
 
-    def _remove_clean_pattern(self):
-        sel = self.clean_pat_listbox.curselection()
-        if sel:
-            self.clean_pat_listbox.delete(sel[0])
-            # 外部ファイルに保存
-            config.save_clean_patterns(self._get_current_patterns())
+    def _toggle_clean_patterns_widget(self):
+        state = tk.NORMAL if self.clean_do_clean_var.get() else tk.DISABLED
+        def set_state(widget, state):
+            try:
+                widget.configure(state=state)
+            except:
+                pass
+            for child in widget.winfo_children():
+                set_state(child, state)
+        set_state(self.pat_frame, state)
 
-    def _reset_clean_patterns(self):
-        """外部ファイルから再読み込みする（ファイルがなければ初期値）"""
-        patterns = config.load_clean_patterns()
-        self.clean_pat_listbox.delete(0, tk.END)
-        for pat in patterns:
-            self.clean_pat_listbox.insert(tk.END, pat)
+    def _sort_clean_tree(self, col):
+        if getattr(self, "clean_sort_column", None) == col:
+            self.clean_sort_reverse = not getattr(self, "clean_sort_reverse", False)
+        else:
+            self.clean_sort_column = col
+            self.clean_sort_reverse = False
+            
+        def get_val(item):
+            if col == "checked": return item.is_checked
+            if col == "archive": return item.archive_name.lower()
+            if col == "path": return item.archive_path.lower()
+            if col == "clean": return len(item.matched_files)
+            if col == "nest_shorten": return f"{item.has_nested_folders}_{len(item.long_name_files)}"
+            if col == "convert": return f"{item.needs_conversion}_{item.target_format}"
+            if col == "mtime": return item.mtime
+            return ""
+            
+        self.clean_scan_results.sort(key=get_val, reverse=self.clean_sort_reverse)
+        
+        for c in ["checked", "archive", "path", "clean", "nest_shorten", "convert", "mtime"]:
+            text = self.clean_tree.heading(c, "text").replace(" ▲", "").replace(" ▼", "")
+            if c == col:
+                text += " ▼" if self.clean_sort_reverse else " ▲"
+            self.clean_tree.heading(c, text=text)
 
-    def _get_current_patterns(self) -> list[str]:
-        return list(self.clean_pat_listbox.get(0, tk.END))
+        self._rebuild_clean_tree()
+
+    def _rebuild_clean_tree(self):
+        self.clean_tree.delete(*self.clean_tree.get_children())
+        for r in self.clean_scan_results:
+            mark = "☑" if r.is_checked else "☐"
+            if r.matched_files:
+                clean_str = f"{len(r.matched_files)}件"
+            else:
+                clean_str = "-"
+            ns_list = []
+            if r.has_chapter_folders: ns_list.append("話数整理")
+            elif r.has_nested_folders: ns_list.append("階層")
+            if r.long_name_files: ns_list.append("名前")
+            if r.symbol_name_files or '!' in r.archive_name: ns_list.append("記号")
+            ns_str = "+".join(ns_list) if ns_list else "-"
+            
+            conv_list = []
+            if r.extension_fixed_msg:
+                conv_list.append("拡張子修正")
+            if r.needs_conversion:
+                conv_list.append(f"{r.original_format}->{r.target_format}")
+            elif r.target_format and r.target_format != r.original_format:
+                conv_list.append(f"->{r.target_format}")
+            conv_str = ", ".join(conv_list) if conv_list else "維持"
+            
+            self.clean_tree.insert("", tk.END, values=(mark, r.archive_name, r.archive_path, clean_str, ns_str, conv_str, r.mtime_str))
 
     def _scan_clean_archives(self):
         root_dir = self.clean_dir_var.get()
-        if not root_dir or not os.path.isdir(root_dir):
-            messagebox.showwarning("入力エラー", "対象フォルダを正しく指定してください。")
+        paths = [p.strip() for p in root_dir.split(";") if p.strip()]
+        if not paths:
+            messagebox.showwarning("入力エラー", "対象フォルダを指定してください。")
             return
+        for p in paths:
+            if not os.path.isdir(p):
+                messagebox.showwarning("入力エラー", f"フォルダが存在しません:\n{p}")
+                return
+
+        self._add_to_history(root_dir)
 
         self.clean_scan_btn.config(state=tk.DISABLED)
         self.clean_exec_btn.config(state=tk.DISABLED)
@@ -658,12 +736,41 @@ class ArchiveFileManagerGUI:
         self.clean_scan_results = []
         self.clean_prog_var.set(0)
 
+        days_within = None
+        if self.clean_date_filter_enabled_var.get():
+            val = self.clean_date_filter_combo.get()
+            if val == "7日以内":
+                days_within = 7
+            elif val == "30日以内":
+                days_within = 30
+            elif val == "90日以内":
+                days_within = 90
+            elif val == "365日以内":
+                days_within = 365
+            elif val == "カスタム":
+                try:
+                    days_within = int(self.clean_custom_days_var.get())
+                    if days_within <= 0:
+                        raise ValueError()
+                except ValueError:
+                    messagebox.showwarning("入力エラー", "日数は1以上の正の整数で指定してください。")
+                    self.clean_scan_btn.config(state=tk.NORMAL)
+                    self.clean_res_label.config(text="待機中...")
+                    return
+
+        is_nesting_on = self.clean_nesting_var.get()
         opts = {
             "root_dir": root_dir,
-            "patterns": self._get_current_patterns(),
+            "patterns": self._get_current_patterns() if self.clean_do_clean_var.get() else None,
             "recursive": self.clean_recursive_var.get(),
-            "check_nesting": self.clean_nesting_var.get(),
+            "exclude_original": self.clean_exclude_original_var.get(),
+            "check_nesting": is_nesting_on,
+            "check_chapter_organize": is_nesting_on and self.clean_chapter_organize_var.get(),
             "check_shorten": self.clean_shorten_var.get(),
+            "normalize_symbols": self.clean_symbols_var.get(),
+            "days_within": days_within,
+            "target_format": None if self.target_fmt_var.get() == "元の形式を維持" else self.target_fmt_var.get(),
+            "fix_extensions": self.clean_fix_ext_var.get(),
         }
 
         threading.Thread(target=self._run_clean_scan, args=(opts,), daemon=True).start()
@@ -674,8 +781,14 @@ class ArchiveFileManagerGUI:
                 root_dir=opts["root_dir"],
                 patterns=opts["patterns"],
                 recursive=opts["recursive"],
+                exclude_original=opts["exclude_original"],
                 check_nesting=opts["check_nesting"],
                 check_long_names=opts["check_shorten"],
+                normalize_symbols=opts["normalize_symbols"],
+                days_within=opts["days_within"],
+                target_format=opts["target_format"],
+                fix_extensions=opts["fix_extensions"],
+                check_chapter_organize=opts["check_chapter_organize"],
                 progress_callback=lambda c, t: self.root.after(0, self._update_clean_progress, c, t),
             )
             self.root.after(0, self._finish_clean_scan, results)
@@ -691,33 +804,27 @@ class ArchiveFileManagerGUI:
 
     def _finish_clean_scan(self, results):
         self.clean_scan_results = results
-        total_matched = 0
-
-        for r in results:
-            files_str = ", ".join([os.path.basename(f) for f in r.matched_files])
-            if not files_str:
-                files_str = "(なし)"
-                
-            nest_shorten = []
-            if r.has_nested_folders: nest_shorten.append("階層")
-            if r.long_name_files: nest_shorten.append("名前")
-            ns_str = "+".join(nest_shorten) if nest_shorten else "-"
-
-            self.clean_tree.insert("", tk.END, values=(r.archive_name, files_str, ns_str))
-            total_matched += len(r.matched_files)
-
-        self.clean_res_label.config(text=f"対象: 書庫 {len(results)} 件 / ファイル {total_matched} 個")
+        for c in ["checked", "archive", "path", "clean", "nest_shorten", "convert", "mtime"]:
+            text = self.clean_tree.heading(c, "text").replace(" ▲", "").replace(" ▼", "")
+            self.clean_tree.heading(c, text=text)
+        self.clean_sort_column = None
+            
+        self._rebuild_clean_tree()
+        self.clean_res_label.config(text=f"対象: 書庫 {len(results)} 件")
         self.clean_scan_btn.config(state=tk.NORMAL)
-        
-        if results:
-            self.clean_exec_btn.config(state=tk.NORMAL)
+        self._update_clean_exec_button()
         self.clean_status_var.set("スキャン完了")
 
     def _execute_clean(self):
         if not self.clean_scan_results:
             return
 
-        if not messagebox.askyesno("確認", "リストアップされた書庫の最適化を実行します。\nよろしいですか？"):
+        checked_results = [r for r in self.clean_scan_results if r.is_checked]
+        if not checked_results:
+            messagebox.showwarning("警告", "対象の書庫が選択されていません。")
+            return
+
+        if not messagebox.askyesno("確認", f"選択された {len(checked_results)} 件の書庫の最適化・変換を実行します。\nよろしいですか？"):
             return
 
         self.is_running = True
@@ -726,10 +833,27 @@ class ArchiveFileManagerGUI:
         self.clean_exec_btn.config(state=tk.DISABLED)
         self.clean_cancel_btn.config(state=tk.NORMAL)
         self.clean_prog_var.set(0)
+        self.clean_status_var.set(f"処理中... 0 / {len(checked_results)} (0%)")
+        
+        self.log_text.config(state=tk.NORMAL)
+        self.log_text.delete(1.0, tk.END)
+        self.log_text.config(state=tk.DISABLED)
 
+        level_name = self.comp_level_var.get()
+        comp_level = config.COMPRESSION_LEVELS.get(level_name, 3)
+
+        is_nesting_on = self.clean_nesting_var.get()
         opts = {
-            "do_nesting": self.clean_nesting_var.get(),
+            "do_clean": self.clean_do_clean_var.get(),
+            "do_nesting": is_nesting_on,
+            "do_chapter_organize": is_nesting_on and self.clean_chapter_organize_var.get(),
             "do_shorten": self.clean_shorten_var.get(),
+            "normalize_symbols": self.clean_symbols_var.get(),
+            "fix_extensions": self.clean_fix_ext_var.get(),
+            "delete_original": self.delete_orig_var.get(),
+            "preserve_timestamp": self.clean_preserve_timestamp_var.get(),
+            "compression_level": comp_level,
+            "scan_results": checked_results,
         }
 
         threading.Thread(target=self._run_clean_batch, args=(opts,), daemon=True).start()
@@ -737,34 +861,49 @@ class ArchiveFileManagerGUI:
     def _run_clean_batch(self, opts):
         try:
             results = batch_clean_archives(
-                scan_results=self.clean_scan_results,
+                scan_results=opts["scan_results"],
+                do_clean=opts["do_clean"],
                 do_nesting=opts["do_nesting"],
                 do_shorten=opts["do_shorten"],
+                normalize_symbols=opts["normalize_symbols"],
+                fix_extensions=opts["fix_extensions"],
+                delete_original=opts["delete_original"],
+                preserve_timestamp=opts["preserve_timestamp"],
+                compression_level=opts["compression_level"],
+                do_chapter_organize=opts["do_chapter_organize"],
                 progress_callback=lambda c, t: self.root.after(0, self._update_clean_progress, c, t),
+                log_callback=self._log,
+                status_callback=lambda status: self.root.after(0, self.clean_status_var.set, status),
                 cancel_check=lambda: self.cancel_requested
             )
             
-            # 結果集計
             success_count = sum(1 for r in results if r.success)
             fail_count = len(results) - success_count
             del_total = sum(r.deleted_count for r in results)
             flat_total = sum(r.flattened_count for r in results)
             short_total = sum(r.shortened_count for r in results)
+            symbol_total = sum(r.symbol_count for r in results)
+            org_total = sum(r.organized_files_count for r in results)
             
             msg = f"処理完了: {success_count}件\n"
-            msg += f"- 削除したファイル: {del_total}件\n"
-            msg += f"- 解消した階層: {flat_total}段\n"
-            msg += f"- 短縮した名前: {short_total}件"
+            if org_total: msg += f"- 話数整理したファイル: {org_total}件\n"
+            if del_total: msg += f"- 削除したファイル: {del_total}件\n"
+            if flat_total: msg += f"- 解消した階層: {flat_total}段\n"
+            if short_total: msg += f"- 短縮した名前: {short_total}件\n"
+            if symbol_total: msg += f"- 記号を整理した名前: {symbol_total}件\n"
+            
             if fail_count > 0:
-                msg += f"\n\n※失敗: {fail_count}件"
+                msg += f"\n\n※失敗: {fail_count}件\n※失敗原因の詳細は実行ファイルと同階層の 'archive_cleaner.log' を参照してください。"
 
+            if self.cancel_requested:
+                msg = "中断されました。\n\n" + msg
             self.root.after(0, lambda: messagebox.showinfo("完了", msg))
 
-            # 一旦リストをクリア（再スキャンが必要なため）
             self.root.after(0, self._clear_clean_results)
 
         except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror("エラー", f"予期せぬエラーが発生しました:\n{e}"))
+            logger.exception("書庫クリーンの一括処理に失敗")
+            self.root.after(0, lambda error=str(e): messagebox.showerror("エラー", f"予期せぬエラーが発生しました:\n{error}"))
             
         self.root.after(0, self._finish_clean_batch)
 
@@ -772,21 +911,190 @@ class ArchiveFileManagerGUI:
         self.clean_tree.delete(*self.clean_tree.get_children())
         self.clean_scan_results = []
         self.clean_res_label.config(text="待機中...")
-        self.clean_status_var.set("完了")
+        if self.cancel_requested:
+            self.clean_status_var.set("中断されました")
+        else:
+            self.clean_status_var.set("完了")
 
     def _finish_clean_batch(self):
         self.is_running = False
         self.clean_scan_btn.config(state=tk.NORMAL)
         self.clean_cancel_btn.config(state=tk.DISABLED)
-        # 再スキャンするまで実行ボタンは無効
         self.clean_exec_btn.config(state=tk.DISABLED)
 
+    def _add_clean_pattern(self):
+        pat = self.clean_pat_var.get().strip()
+        if pat:
+            patterns = self._get_current_patterns()
+            if pat not in patterns:
+                self.clean_pat_listbox.insert(tk.END, pat)
+                self.clean_pat_var.set("")
+                self._save_patterns_to_file()
 
-# 部分適用のためのヘルパー
-from functools import partial
+    def _toggle_nesting_options(self):
+        """余分な入れ子を解消するチェックに応じて話数別整理の活性/非活性を切り替える"""
+        if self.clean_nesting_var.get():
+            self.clean_chapter_organize_chk.config(state=tk.NORMAL)
+        else:
+            self.clean_chapter_organize_chk.config(state=tk.DISABLED)
 
-if __name__ == "__main__":
-    root = tk.Tk()
-    # アイコン等あれば
-    app = ArchiveFileManagerGUI(root)
-    root.mainloop()
+    def _remove_clean_pattern(self):
+        selected = self.clean_pat_listbox.curselection()
+        if selected:
+            self.clean_pat_listbox.delete(selected[0])
+            self._save_patterns_to_file()
+
+    def _reset_clean_patterns(self):
+        self.clean_pat_listbox.delete(0, tk.END)
+        import os
+        path = "clean_patterns.txt"
+        if not os.path.exists(path):
+            path = os.path.join("dist", "clean_patterns.txt")
+        
+        default_patterns = ["*.txt", "*.url", "*.lnk", "*.net", "Thumbs.db", "desktop.ini", ".DS_Store", ".com", "zhonyk.*", "*.rar"]
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    patterns = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+                for p in patterns:
+                    self.clean_pat_listbox.insert(tk.END, p)
+                return
+            except Exception as e:
+                logger.error(f"パターンファイル読み込み失敗: {e}")
+        
+        for p in default_patterns:
+            self.clean_pat_listbox.insert(tk.END, p)
+
+    def _save_patterns_to_file(self):
+        import os
+        path = "clean_patterns.txt"
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("# ArchiveFileManager - 書庫クリーン削除パターン設定\n")
+                f.write("# 1行に1つのパターン（グロブ形式）を記述してください。\n")
+                for p in self._get_current_patterns():
+                    f.write(f"{p}\n")
+        except Exception as e:
+            logger.error(f"パターンファイル書き出し失敗: {e}")
+
+    def _get_current_patterns(self) -> list[str]:
+        return list(self.clean_pat_listbox.get(0, tk.END))
+
+    def _on_clean_tree_click(self, event):
+        region = self.clean_tree.identify("region", event.x, event.y)
+        if region == "cell":
+            col = self.clean_tree.identify_column(event.x)
+            if col == "#1":
+                item_id = self.clean_tree.identify_row(event.y)
+                self._toggle_clean_check(item_id)
+
+    def _on_clean_tree_double_click(self, event):
+        item_id = self.clean_tree.identify_row(event.y)
+        if not item_id:
+            return
+        values = self.clean_tree.item(item_id, "values")
+        archive_path = values[2]
+        target_item = next((x for x in self.clean_scan_results if x.archive_path == archive_path), None)
+        if target_item and os.path.isfile(target_item.archive_path):
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(target_item.archive_path)])
+
+    def _toggle_clean_check(self, item_id):
+        if not item_id:
+            return
+        values = self.clean_tree.item(item_id, "values")
+        archive_path = values[2]
+        target_item = next((x for x in self.clean_scan_results if x.archive_path == archive_path), None)
+        if target_item:
+            target_item.is_checked = not target_item.is_checked
+            new_mark = "☑" if target_item.is_checked else "☐"
+            new_values = list(values)
+            new_values[0] = new_mark
+            self.clean_tree.item(item_id, values=new_values)
+            self._update_clean_exec_button()
+
+    def _clean_select_all(self):
+        if not self.clean_scan_results:
+            return
+        for item in self.clean_scan_results:
+            item.is_checked = True
+        self._refresh_clean_tree_marks()
+
+    def _clean_deselect_all(self):
+        if not self.clean_scan_results:
+            return
+        for item in self.clean_scan_results:
+            item.is_checked = False
+        self._refresh_clean_tree_marks()
+
+    def _refresh_clean_tree_marks(self):
+        for item_id in self.clean_tree.get_children():
+            values = self.clean_tree.item(item_id, "values")
+            archive_path = values[2]
+            target_item = next((x for x in self.clean_scan_results if x.archive_path == archive_path), None)
+            if target_item:
+                new_mark = "☑" if target_item.is_checked else "☐"
+                new_values = list(values)
+                new_values[0] = new_mark
+                self.clean_tree.item(item_id, values=new_values)
+        self._update_clean_exec_button()
+
+    def _update_clean_exec_button(self):
+        if not self.clean_scan_results:
+            self.clean_exec_btn.config(state=tk.DISABLED, text="▶ 処理実行")
+            return
+        checked_count = sum(1 for r in self.clean_scan_results if r.is_checked)
+        if checked_count > 0:
+            self.clean_exec_btn.config(state=tk.NORMAL, text=f"▶ 選択した書庫の最適化・変換を実行 ({checked_count}件)")
+        else:
+            self.clean_exec_btn.config(state=tk.DISABLED, text="▶ 処理実行 (選択なし)")
+
+    def _add_to_history(self, path):
+        # セミコロンで分割して個別に標準化する
+        paths = [os.path.normpath(p.strip()) for p in path.split(";") if p.strip()]
+        normalized_path = ";".join(paths)
+        if not normalized_path:
+            return
+
+        if normalized_path in self.dir_history:
+            self.dir_history.remove(normalized_path)
+        self.dir_history.insert(0, normalized_path)
+        if len(self.dir_history) > 10:
+            self.dir_history = self.dir_history[:10]
+        self.clean_dir_combo['values'] = self.dir_history
+        if hasattr(self, 'empty_dir_combo'):
+            self.empty_dir_combo['values'] = self.dir_history
+        self._save_history()
+
+    def _save_history(self):
+        try:
+            with open("dir_history.txt", "w", encoding="utf-8") as f:
+                for p in self.dir_history:
+                    f.write(f"{p}\n")
+        except Exception as e:
+            logger.error(f"履歴保存失敗: {e}")
+
+    def _load_history(self):
+        self.dir_history = []
+        if os.path.exists("dir_history.txt"):
+            try:
+                with open("dir_history.txt", "r", encoding="utf-8") as f:
+                    self.dir_history = [line.strip() for line in f if line.strip()]
+            except Exception as e:
+                logger.error(f"履歴読み込み失敗: {e}")
+
+    def _toggle_clean_date_widgets(self):
+        state = tk.NORMAL if getattr(self, "clean_date_filter_enabled_var", tk.BooleanVar()).get() else tk.DISABLED
+        if hasattr(self, "clean_date_filter_combo"):
+            self.clean_date_filter_combo.config(state="readonly" if state == tk.NORMAL else tk.DISABLED)
+            self._on_clean_date_combo_changed()
+
+    def _on_clean_date_combo_changed(self, event=None):
+        if not getattr(self, "clean_date_filter_enabled_var", tk.BooleanVar()).get():
+            if hasattr(self, "clean_custom_days_entry"):
+                self.clean_custom_days_entry.config(state=tk.DISABLED)
+            return
+            
+        if hasattr(self, "clean_date_filter_combo") and self.clean_date_filter_combo.get() == "カスタム":
+            self.clean_custom_days_entry.config(state=tk.NORMAL)
+        elif hasattr(self, "clean_custom_days_entry"):
+            self.clean_custom_days_entry.config(state=tk.DISABLED)

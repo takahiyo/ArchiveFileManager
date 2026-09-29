@@ -18,30 +18,63 @@ def _get_rar_paths():
     return config.RAR_EXE, config.UNRAR_EXE, config.WINRAR_EXE
 
 
-def scan_archives(root_dir: str, recursive: bool = True) -> list[str]:
+def scan_archives(root_dir: str, recursive: bool = True, days_within: int | None = None) -> list[str]:
     """
-    指定フォルダ内の圧縮ファイルを検索して一覧を返す。
+    指定フォルダ（複数指定可）内の圧縮ファイルを検索して一覧を返す。
 
     引数:
-        root_dir:   検索対象のフォルダパス
-        recursive:  True の場合、下層フォルダも検索する
+    root_dir:   検索対象のフォルダパス（セミコロン区切りで複数指定可）
+    recursive:  True の場合、下層フォルダも検索する
+    days_within: 指定された日数以内に更新されたファイルのみ対象にする
 
     戻り値:
-        圧縮ファイルのフルパスのリスト
+    圧縮ファイルのフルパスのリスト
     """
+    dirs = [d.strip() for d in root_dir.split(";") if d.strip()]
     archives = []
+    
+    threshold_time = None
+    if days_within is not None and days_within > 0:
+        import time
+        threshold_time = time.time() - (days_within * 86400)
 
-    if recursive:
-        for dirpath, _dirnames, filenames in os.walk(root_dir):
-            for fname in filenames:
-                if os.path.splitext(fname)[1].lower() in config.SUPPORTED_EXTENSIONS:
-                    archives.append(os.path.join(dirpath, fname))
-    else:
-        for fname in os.listdir(root_dir):
-            full_path = os.path.join(root_dir, fname)
-            if os.path.isfile(full_path):
-                if os.path.splitext(fname)[1].lower() in config.SUPPORTED_EXTENSIONS:
-                    archives.append(full_path)
+    for d in dirs:
+        if not os.path.isdir(d):
+            continue
+        if recursive:
+            try:
+                for dirpath, _dirnames, filenames in os.walk(d):
+                    for fname in filenames:
+                        if os.path.splitext(fname)[1].lower() in config.SUPPORTED_EXTENSIONS:
+                            full_path = os.path.join(dirpath, fname)
+                            if threshold_time is not None:
+                                try:
+                                    mtime = os.path.getmtime(full_path)
+                                    if mtime < threshold_time:
+                                        continue
+                                except Exception:
+                                    continue
+                            archives.append(full_path)
+            except Exception as e:
+                logger.error(f"フォルダ走査エラー ({d}): {e}")
+        else:
+            try:
+                entries = os.listdir(d)
+            except OSError as e:
+                logger.error(f"フォルダ読み込みエラー ({d}): {e}")
+                continue
+            for fname in entries:
+                full_path = os.path.join(d, fname)
+                if os.path.isfile(full_path):
+                    if os.path.splitext(fname)[1].lower() in config.SUPPORTED_EXTENSIONS:
+                        if threshold_time is not None:
+                            try:
+                                mtime = os.path.getmtime(full_path)
+                                if mtime < threshold_time:
+                                    continue
+                            except Exception:
+                                 continue
+                        archives.append(full_path)
 
     return sorted(archives)
 
@@ -64,19 +97,24 @@ def extract_archive(archive_path: str, dest_dir: str) -> bool:
             import zipfile
             with zipfile.ZipFile(archive_path, 'r') as z:
                 for member in z.infolist():
-                    # 日本語ファイル名対応
+                    # 日本語ファイル名対応 (UTF-8フラグに関わらず cp437 -> cp932 での復元を試みる)
                     filename = member.filename
-                    if member.flag_bits & 0x800:
-                        filename = filename.encode('cp437').decode('utf-8')
-                    else:
+                    try:
+                        filename = filename.encode('cp437').decode('cp932')
+                    except Exception:
                         try:
-                            filename = filename.encode('cp437').decode('cp932')
-                        except:
+                            filename = filename.encode('cp437').decode('cp932', errors='replace')
+                        except Exception:
                             pass
                     
                     target_path = os.path.join(dest_dir, filename)
-                    # フォルダ作成
-                    if filename.endswith('/') or filename.endswith('\\'):
+                    # フォルダ作成判定 (末尾スラッシュ、または Windows/Unixのディレクトリ属性のいずれかを満たす場合)
+                    is_dir = (filename.endswith('/') or 
+                              filename.endswith('\\') or 
+                              bool(member.external_attr & 0x10) or 
+                              bool((member.external_attr >> 16) & 0o170000 == 0o040000))
+                    
+                    if is_dir:
                         os.makedirs(target_path, exist_ok=True)
                         continue
                     
@@ -93,14 +131,28 @@ def extract_archive(archive_path: str, dest_dir: str) -> bool:
     abs_archive = os.path.abspath(archive_path)
     abs_dest = os.path.abspath(dest_dir)
     
-    cmd = [
-        rar_exe,
-        "x",
-        "-o+",
-        "-y",
-        abs_archive,
-        abs_dest + os.sep,
-    ]
+    # WinRAR.exe が利用可能な場合は、多くの形式（ZIP, 7z等）に対応するため優先して使用
+    if os.path.exists(winrar_exe):
+        cmd = [
+            winrar_exe,
+            "x",
+            "-ibck",
+            "-o+",
+            "-y",
+            abs_archive,
+            abs_dest + os.sep,
+        ]
+    else:
+        cmd = [
+            rar_exe,
+            "x",
+            "-o+",
+            "-y",
+            abs_archive,
+            abs_dest + os.sep,
+        ]
+
+    logger.debug("解凍コマンド: %s", " ".join(cmd))
 
     try:
         result = subprocess.run(
@@ -112,11 +164,12 @@ def extract_archive(archive_path: str, dest_dir: str) -> bool:
             timeout=600,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
-        if result.returncode not in (0, 1):
-            if rar_exe != unrar_exe:
+        # 0: 成功, 1: 警告, 3: CRCエラー（一部ファイルは解凍されているため処理続行）
+        if result.returncode not in (0, 1, 3):
+            if cmd[0] == rar_exe and rar_exe != unrar_exe and os.path.exists(unrar_exe):
                 cmd[0] = unrar_exe
                 result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600, creationflags=subprocess.CREATE_NO_WINDOW)
-                if result.returncode in (0, 1):
+                if result.returncode in (0, 1, 3):
                     return True
 
             err_msg = f"解凍失敗 (コード {result.returncode}): {result.stderr.strip()}"
@@ -146,6 +199,34 @@ def compress_directory(source_dir: str, output_path: str,
     fmt_info = config.TARGET_FORMATS.get(target_format)
     if fmt_info is None:
         return False, f"未対応の形式: {target_format}"
+
+    # フォルダが完全に空（ファイルもサブフォルダも存在しない）であるかチェック
+    has_files = False
+    for root, dirs, files in os.walk(source_dir):
+        if files or dirs:
+            has_files = True
+            break
+            
+    if not has_files:
+        logger.info(f"圧縮対象フォルダが空です: {source_dir}")
+        try:
+            # 形式に応じて空のアーカイブを作成してエラーを回避
+            if target_format == "ZIP":
+                import zipfile
+                with zipfile.ZipFile(output_path, "w") as z:
+                    pass
+            elif target_format == "7z":
+                # 空の7zアーカイブファイル（32バイトのヘッダー）
+                empty_7z = b'7z\xbc\xaf\x27\x1c\x00\x00\x1a\x1b\xee\xda\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+                with open(output_path, "wb") as f:
+                    f.write(empty_7z)
+            else:
+                # RAR等はAPIでの空ファイル作成が難しいため、0バイトファイルを作成
+                with open(output_path, "wb") as f:
+                    pass
+            return True, ""
+        except Exception as e:
+            return False, f"空のアーカイブ作成失敗: {e}"
 
     rar_exe, unrar_exe, winrar_exe = _get_rar_paths()
     # WinRAR.exe を使用 (ZIP/7z 作成に対応するため)
@@ -236,7 +317,7 @@ def convert_archive(
     flatten_folders: bool = True,
     delete_original: bool = False,
     preserve_timestamp: bool = False,
-    progress_callback=None,
+    status_callback=None,
 ) -> ConversionResult:
     """
     1つの圧縮ファイルを変換する。
@@ -294,21 +375,30 @@ def convert_archive(
 
     # 一時フォルダを作成
     temp_dir = tempfile.mkdtemp(prefix="afm_")
+    logger.info(f"変換用一時フォルダを作成しました: {temp_dir}")
 
     try:
         # 2. 解凍
+        logger.info(f"解凍を開始します: {current_path} -> {temp_dir}")
         result.add_message("解凍中...")
+        if status_callback:
+            status_callback("解凍中...")
         if not extract_archive(current_path, temp_dir):
             result.add_message("✗ 解凍に失敗しました")
+            logger.error(f"解凍失敗: {current_path}")
             return result
 
         # 3. フォルダ階層の正規化
         flattened = 0
         if flatten_folders:
+            logger.info("フォルダ階層の正規化チェックを行います")
+            if status_callback:
+                status_callback("フォルダ階層解消中...")
             from folder_normalizer import normalize_folder_structure
             flattened = normalize_folder_structure(temp_dir)
             if flattened > 0:
                 result.add_message(f"フォルダ階層を {flattened} 段解消しました")
+                logger.info(f"フォルダ階層を {flattened} 段解消しました: {temp_dir}")
 
         # 4. 再圧縮
         # 出力ファイル名を決定（元ファイルと同じフォルダに作成）
@@ -324,6 +414,7 @@ def convert_archive(
             result.success = True
             result.skipped = True
             result.add_message("ℹ 変更の必要がないためスキップしました")
+            logger.info(f"変更の必要がないためスキップします: {current_path}")
             return result
 
         # 同名ファイルが存在する場合（＝同じ形式への変換）
@@ -332,15 +423,20 @@ def convert_archive(
             # 一時的な名前で出力して後でリネーム
             temp_output = os.path.join(original_dir, base_name + "_temp" + target_ext)
             result.add_message(f"{target_format} 形式で再圧縮中...")
+            logger.info(f"一時出力パスに再圧縮を開始します: {temp_output} ({target_format})")
+            if status_callback:
+                status_callback("再圧縮中...")
             success, err = compress_directory(temp_dir, temp_output, target_format, compression_level)
             if not success:
                 result.add_message(f"✗ 圧縮に失敗しました: {err}")
+                logger.error(f"圧縮失敗: {err}")
                 # 一時出力ファイルを片付け
                 if os.path.exists(temp_output):
                     os.remove(temp_output)
                 return result
 
             # 元ファイルを削除して一時ファイルをリネーム
+            logger.info(f"元ファイルを削除し、一時ファイルをリネームします: {current_path} -> {output_path}")
             os.remove(current_path)
             os.rename(temp_output, output_path)
         else:
@@ -353,9 +449,13 @@ def convert_archive(
                 counter += 1
 
             result.add_message(f"{target_format} 形式で圧縮中...")
+            logger.info(f"新規圧縮を開始します: {output_path} ({target_format})")
+            if status_callback:
+                status_callback("圧縮中...")
             success, err = compress_directory(temp_dir, output_path, target_format, compression_level)
             if not success:
                 result.add_message(f"✗ 圧縮に失敗しました: {err}")
+                logger.error(f"圧縮失敗: {err}")
                 return result
 
             # 5. 元ファイルの削除（オプション）
@@ -398,6 +498,7 @@ def batch_convert(
     preserve_timestamp: bool = False,
     progress_callback=None,
     log_callback=None,
+    status_callback=None,
     cancel_check=None,
 ) -> list[ConversionResult]:
     """
@@ -413,6 +514,7 @@ def batch_convert(
         preserve_timestamp: 変換後ファイルに元ファイルの時刻を復元するか
         progress_callback:  進捗報告 (current, total) を受け取る関数
         log_callback:       ログメッセージ (str) を受け取る関数
+        status_callback:    詳細ステータス文字列を受け取る関数
         cancel_check:       キャンセル判定の関数（True を返したら中断）
 
     戻り値:
@@ -440,6 +542,7 @@ def batch_convert(
             flatten_folders=flatten_folders,
             delete_original=delete_original,
             preserve_timestamp=preserve_timestamp,
+            status_callback=lambda step: status_callback(f"[{i + 1}/{total}] {step}") if status_callback else None
         )
 
         results.append(conv_result)

@@ -12,6 +12,11 @@ import sys
 # ---------------------------------------------------------------------------
 APP_NAME = "ArchiveFileManager"
 APP_VERSION = "1.1.0"
+UI_SETTINGS_FILE = "settings.ini"
+# 話数整理の退避名と抽出除外判定で共有する目印。
+ORIGINAL_ARCHIVE_MARKER = "_Original"
+DEFAULT_WINDOW_WIDTH = 1200
+DEFAULT_WINDOW_HEIGHT = 950
 
 # ---------------------------------------------------------------------------
 # WinRAR 実行ファイルのパス
@@ -152,6 +157,33 @@ DEFAULT_CLEAN_PATTERNS = load_clean_patterns()
 # 書庫内ファイル名・フォルダ名の最大文字数（拡張子を除く）
 # この値を超える名前は短縮の対象となる
 MAX_NAME_LENGTH = 80
+
+DIR_HISTORY_FILE = "dir_history.txt"
+
+def load_dir_history() -> list[str]:
+    """外部ファイルからフォルダ選択履歴を読み込む。"""
+    file_path = os.path.join(get_exe_dir(), DIR_HISTORY_FILE)
+    if os.path.isfile(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                history = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+                return [h for h in history if os.path.isdir(h)]  # 存在するフォルダのみ有効
+        except Exception as e:
+            print(f"Failed to load {DIR_HISTORY_FILE}: {e}")
+    return []
+
+def save_dir_history(history: list[str]):
+    """フォルダ選択履歴を外部ファイルに保存する。"""
+    file_path = os.path.join(get_exe_dir(), DIR_HISTORY_FILE)
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write("# ArchiveFileManager - Folder Selection History\n")
+            for path in history:
+                f.write(f"{path}\n")
+    except Exception as e:
+        print(f"Failed to save {DIR_HISTORY_FILE}: {e}")
+
+DEFAULT_DIR_HISTORY = load_dir_history()
 
 # ---------------------------------------------------------------------------
 # ユーティリティ
